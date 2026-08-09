@@ -69,15 +69,31 @@ class Folder(Base):
 
 
 class Doc(Base):
-    def __init__(self, name, link):
+    def __init__(self, name, link, filename=None, modified=None):
         # links come in as a relative path, so when serializing, need to convert to full path to
         # predownload link (need redirect to get final download link)
         self.name = name
         self.link = link
+        # The REST backend knows the real filename up front; the HTML scraper does not
+        # and has to recover it from the download redirect.
+        self.filename = filename
+        # ISO-8601 timestamp of the last change on Blackboard, when known. This is what
+        # lets the dashboard tell "already downloaded" from "updated since you
+        # downloaded it".
+        self.modified = modified
 
     def serialize(self, BbRouter: str, load_download_links: bool = False) -> Dict:
         predownload_link = get_predownload_link(self.link)
-        return {"type": "file", "name": self.name, "predownload_link": predownload_link}
+        result = {
+            "type": "file",
+            "name": self.name,
+            "predownload_link": predownload_link,
+        }
+        if self.filename:
+            result["filename"] = self.filename
+        if self.modified:
+            result["modified"] = self.modified
+        return result
 
 
 class RecordedLecture(Base):

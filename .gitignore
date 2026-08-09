@@ -95,3 +95,11 @@ dmypy.json
 # Pyre type checker
 .pyre/
 ```
+
+# NTULearn Downloader local state
+# Staging folder for downloaded course material, plus the Drive ledger and content
+# cache that live inside it. Machine-specific and contains Drive file ids.
+NTU/
+.ntu_learn_downloader/
+drive_ledger.json
+content_cache.json

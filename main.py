@@ -5,12 +5,13 @@ from pathlib import Path
 from typing import Dict, List
 
 from ntu_learn_downloader import (
-    authenticate,
     get_courses,
     get_download_dir,
     get_file_download_link,
     get_recorded_lecture_download_link,
 )
+from ntu_learn_downloader import auth
+from ntu_learn_downloader.contentcache import ContentCache
 from ntu_learn_downloader.utils import (
     download,
     get_filename_from_url,
@@ -24,11 +25,44 @@ parser = argparse.ArgumentParser(description="CLI wrapper to NTULearn Downloader
 
 # Authentication
 parser.add_argument(
+    "--bbrouter",
+    type=str,
+    help="BbRouter session cookie copied from a logged-in browser. Cached after first "
+    "use, so you only need to pass it again once it expires. Run with no auth "
+    "arguments to see how to obtain it.",
+)
+parser.add_argument(
+    "--token_file",
+    type=str,
+    default=auth.DEFAULT_TOKEN_PATH,
+    help="Where to cache the session token (default: {})".format(
+        auth.DEFAULT_TOKEN_PATH
+    ),
+)
+parser.add_argument(
+    "--no_cache",
+    action="store_true",
+    help="Do not read or write the cached session token",
+)
+parser.add_argument(
     "-username",
     type=str,
-    help="username including domain name (e.g. username@student.main.ntu.edu.sg)",
+    help=argparse.SUPPRESS,  # no longer supported, kept to give a useful error
 )
-parser.add_argument("-password", type=str, help="password")
+parser.add_argument("-password", type=str, help=argparse.SUPPRESS)
+
+# Backend selection
+parser.add_argument(
+    "--legacy",
+    action="store_true",
+    help="Force the legacy Original-course-view HTML scraper instead of the REST API",
+)
+parser.add_argument(
+    "--all_courses",
+    action="store_true",
+    help="Use every enrolment. By default only courses starred as Favourites in "
+    "NTULearn are read.",
+)
 
 # Other flags
 parser.add_argument(
@@ -86,7 +120,9 @@ def download_files(
         if ignore_files:
             return
         download_link = get_file_download_link(BbRouter, obj["predownload_link"])
-        filename = get_filename_from_url(download_link)
+        # The REST backend supplies the real filename; the scraper has to infer it from
+        # the download redirect.
+        filename = obj.get("filename") or get_filename_from_url(download_link)
         if filename is None:
             print("Unable to get filename from: {}".format(download_link))
             return
@@ -106,9 +142,13 @@ def download_files(
         full_file_path = os.path.join(download_path, video_name)
         if os.path.exists(full_file_path) or dummy_file_exists(download_path, video_name):
             return
-        download_link = get_recorded_lecture_download_link(
-            BbRouter, obj["predownload_link"]
-        )
+        try:
+            download_link = get_recorded_lecture_download_link(
+                BbRouter, obj["predownload_link"]
+            )
+        except ValueError as e:
+            print("- skipping {}: {}".format(video_name, e))
+            return
         video_size = get_video_download_size(download_link)
         to_download = True
         if to_prompt:
@@ -165,15 +205,44 @@ def query_yes_no(question, default="yes"):
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    bbrouter = authenticate(args.username, args.password)
 
-    print("you are taking the following courses:")
-    courses = get_courses(bbrouter)
+    if args.username or args.password:
+        print(
+            "-username/-password are no longer supported: NTULearn authenticates "
+            "through Microsoft Entra ID with MFA, which cannot be scripted.\n"
+        )
+
+    try:
+        bbrouter = auth.resolve(
+            args.bbrouter, token_path=args.token_file, use_cache=not args.no_cache
+        )
+    except auth.AuthenticationError as e:
+        print(e)
+        sys.exit(1)
+
+    prefer_rest = not args.legacy
+    favorites_only = not args.all_courses
+
+    print("your {}:".format("Favourites" if favorites_only else "courses"))
+    try:
+        courses = get_courses(
+            bbrouter, prefer_rest=prefer_rest, favorites_only=favorites_only
+        )
+    except auth.AuthenticationError as e:
+        print(e)
+        sys.exit(1)
+    if not courses:
+        print("No courses returned. The session token may be for a different user, "
+              "or the token has expired.")
+        sys.exit(1)
     for course_name, course_id in courses:
         print("- {}".format(course_name))
 
     if args.download_to:
         print("\n\nDownloading to {}".format(args.download_to))
+
+        # Cached attachment lists keep repeat runs to ~1 request per course.
+        cache = ContentCache(args.download_to)
 
         ignore_recorded_lectures = False if args.download_recorded_lectures else True
         ignored_modules: List[str] = []
@@ -187,7 +256,9 @@ if __name__ == "__main__":
             if in_ignored_modules(name, ignored_modules):
                 continue
             print(name)
-            course_folder = get_download_dir(bbrouter, name, course_id)
+            course_folder = get_download_dir(
+                bbrouter, name, course_id, prefer_rest=prefer_rest, cache=cache
+            )
 
             download_files(
                 bbrouter,
@@ -197,5 +268,7 @@ if __name__ == "__main__":
                 ignore_recorded_lectures=not args.download_recorded_lectures,
                 to_prompt=args.prompt,
             )
+
+        cache.save()
 
     print("DONE")

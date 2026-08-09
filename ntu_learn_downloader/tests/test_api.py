@@ -4,6 +4,7 @@ from unittest.mock import patch
 from ntu_learn_downloader.tests.mock_server import MOCK_CONSTANTS
 from ntu_learn_downloader import (
     get_courses,
+    get_courses_legacy,
     get_content_ids,
     get_recorded_lecture_download_link,
     get_file_download_link,
@@ -39,7 +40,10 @@ class TestAPI(unittest.TestCase):
             ("Student Life Modules", "302307_1"),
         ]
         with patch.dict("ntu_learn_downloader.api.__dict__", MOCK_CONSTANTS):
-            result = get_courses(BbRouter)
+            # This fixture is the Original-view global nav menu, so exercise that
+            # scraper directly. get_courses() now defaults to Ultra Favourites, which
+            # the fixture server knows nothing about.
+            result = get_courses_legacy(BbRouter)
 
             expected = set(expected_result)
             got = set(result)
@@ -69,8 +73,10 @@ class TestAPI(unittest.TestCase):
         actual file object: https://ntulearn.ntu.edu.sg/bbcswebdav/pid-1875202-dt-content-rid-9478989_1/xid-9478989_1
         from 19S2-CE2003-DIGITAL SYSTEMS DESIGN / Content / Tutorials / Tutorial solutions / Tut1_CE2003_soln
         """
-        expected_url = "https://ntulearn.ntu.edu.sg/bbcswebdav/pid-1875202-dt-content-rid-9478989_1/courses/19S2-CE2003-LEC/Tut1_CE2003_soln.pdf"
-        link = "https://ntulearn.ntu.edu.sg/bbcswebdav/pid-1875202-dt-content-rid-9478989_1/xid-9478989_1"
+        # Point at the mock server: this previously made a live request to production
+        # NTULearn, which no longer issues the redirect the assertion depends on.
+        expected_url = "http://localhost:8082/bbcswebdav/pid-1875202-dt-content-rid-9478989_1/courses/19S2-CE2003-LEC/Tut1_CE2003_soln.pdf"
+        link = "http://localhost:8082/bbcswebdav/pid-1875202-dt-content-rid-9478989_1/xid-9478989_1"
         with patch.dict("ntu_learn_downloader.api.__dict__", MOCK_CONSTANTS):
             result = get_file_download_link(BbRouter, link)
             self.assertEqual(expected_url, result)

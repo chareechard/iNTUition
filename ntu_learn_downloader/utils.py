@@ -78,13 +78,19 @@ def make_GET_request(BbRouter, path, params=None):
     return requests.get(path, headers=headers, cookies=cookies, params=params)
 
 
+def is_rest_download_link(url: str) -> bool:
+    """REST attachment download links, e.g.
+    /learn/api/public/v1/courses/_1_1/contents/_2_1/attachments/_3_1/download
+    """
+    pattern = r"/learn/api/public/v\d+/courses/[^/]+/contents/[^/]+/attachments/[^/]+/download"
+    return re.search(pattern, url) is not None
+
+
 def get_predownload_link(url: str) -> str:
     # get predownload link for document
-    if not url.startswith("https://ntulearn.ntu.edu.sg/bbcswebdav/") and url.startswith(
-        "/bbcswebdav/"
-    ):
+    if url.startswith("/bbcswebdav/") or url.startswith("/learn/api/"):
         url = "https://ntulearn.ntu.edu.sg" + url
-    if not is_download_link(url):
+    if not is_download_link(url) and not is_rest_download_link(url):
         raise ValueError("url: {} does not look like a download link".format(url))
     return url
 
@@ -226,7 +232,7 @@ def has_ext(url: str) -> bool:
 def get_video_download_size(url: str) -> Optional[str]:
     res = requests.head(url, allow_redirects=True)
 
-    size = res.headers["Content-Length"]
+    size = res.headers.get("Content-Length")
     if size:
         return convert_size(int(size))
     return None

@@ -11,7 +11,14 @@ def parse_recorded_lecture_contents(html: str) -> str:
     m3 = re.search(r'addStreamInfo\("\S+", "(\S+)", "", "", "", "as"\)', html)
 
     if m1 is None or m2 is None or m3 is None:
-        raise ValueError('Unable to get mp4 download link')
+        # NTU decommissioned AcuStudio; its hosts no longer resolve. Recordings now live
+        # in externally hosted tools (Zoom/Panopto/Kaltura/...) which this tool cannot
+        # download with a Learn session cookie alone.
+        raise ValueError(
+            'Unable to get mp4 download link: the page is not an AcuStudio player. '
+            'AcuStudio has been decommissioned at NTU and recorded lectures are no '
+            'longer downloadable through NTULearn.'
+        )
     gsUserId, gsModuleId = m1.groups()[0], m2.groups()[0]
     domain = m3.groups()[0]
     url = "https://" + domain + "/content/" + gsUserId + "/" + gsModuleId + "/media/1.mp4"

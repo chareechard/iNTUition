@@ -55,7 +55,11 @@ class Storage:
 
             if node_type in ["file", "recorded_lecture"]:
                 new_node["download_link"] = saved_node.get("download_link")
-                new_node["filename"] = saved_node.get("filename")
+                # Do not clobber a filename the incoming (REST) tree already knows with
+                # a None from an older saved tree.
+                saved_filename = saved_node.get("filename")
+                if saved_filename or "filename" not in new_node:
+                    new_node["filename"] = saved_filename
             elif node_type == "folder":
                 mapping = saved_node["mapping"]
                 saved_children = saved_node["children"]

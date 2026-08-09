@@ -18,6 +18,7 @@ from ntu_learn_downloader.constants import (
     NTULEARN_URL,
     SAML_SSO_URL,
 )
+from ntu_learn_downloader.auth import AuthenticationError, HOW_TO_GET_TOKEN
 from ntu_learn_downloader.utils import (
     get_content_id_from_listContent_url,
     is_download_link,
@@ -31,7 +32,26 @@ from ntu_learn_downloader.parsing import (
 
 
 def authenticate(username: str, password: str) -> str:
-    """NTU SSO authentication flow to generate BbRouter (NTULearn access token)
+    """DEPRECATED - NTU no longer supports scripted username/password authentication.
+
+    As of the migration to Blackboard Learn SaaS, ntulearn.ntu.edu.sg federates to
+    Microsoft Entra ID (login.microsoftonline.com) rather than ADFS
+    (loginfs.ntu.edu.sg), and Entra enforces MFA. The ADFS form POST this function
+    performed no longer exists in the login chain, so there is nothing to fix here -
+    the flow itself is obsolete.
+
+    Use ``ntu_learn_downloader.auth.resolve`` with a browser-obtained BbRouter cookie
+    instead. Raises AuthenticationError with instructions.
+    """
+    raise AuthenticationError(
+        "Username/password login is no longer supported by NTULearn.\n\n"
+        + HOW_TO_GET_TOKEN
+    )
+
+
+def _authenticate_adfs_legacy(username: str, password: str) -> str:
+    """Historical ADFS SSO flow, retained for reference only. Does not work against
+    the current NTULearn deployment.
 
     Hit the following endpoints:
     1. GET https://loginfs.ntu.edu.sg/adfs/ls/ to get blank BbRouter
@@ -96,14 +116,55 @@ def authenticate(username: str, password: str) -> str:
     return BbRouter
 
 
-def get_courses(BbRouter: str) -> List[Tuple[str, str]]:
-    """Return list of courses that user is currently reading
+def get_courses(
+    BbRouter: str, prefer_rest: bool = True, favorites_only: bool = True
+) -> List[Tuple[str, str]]:
+    """Return list of courses that user is currently reading.
+
+    Restricted to Ultra Favourites by default. Tries the Blackboard REST API first
+    (works for Ultra and Original courses), and falls back to scraping the Original-view
+    global nav menu only when the full list was requested.
 
     Arguments:
         BbRouter {str} -- authentication token
+        prefer_rest {bool} -- set False to force the legacy HTML scraper
+        favorites_only {bool} -- restrict to courses starred as Favourites in Ultra
 
     Returns:
         List[Tuple[str, str]] -- list of tuples (course name, course_id)
+    """
+    if prefer_rest:
+        from ntu_learn_downloader import rest
+
+        try:
+            courses = rest.get_courses(BbRouter, favorites_only=favorites_only)
+            if courses:
+                return courses
+        except (rest.RestUnavailable, requests.RequestException, ValueError) as e:
+            if favorites_only:
+                # The legacy scraper has no concept of Favourites, so falling back
+                # would silently return every enrolment instead of the starred few.
+                # Refuse rather than quietly widen what gets downloaded.
+                raise AuthenticationError(
+                    "Could not read your Favourites ({}).\n"
+                    "Star courses on the NTULearn Courses page, or pass --all_courses "
+                    "to use every enrolment instead.".format(e)
+                )
+            print("REST course listing unavailable ({}), falling back to scraper".format(e))
+
+    if favorites_only and not prefer_rest:
+        raise AuthenticationError(
+            "--legacy cannot read Favourites: the Original-view scraper has no such "
+            "concept. Use --all_courses with --legacy, or drop --legacy."
+        )
+
+    return get_courses_legacy(BbRouter)
+
+
+def get_courses_legacy(BbRouter: str) -> List[Tuple[str, str]]:
+    """Scrape the Original-view global course nav menu.
+
+    Only returns anything on installs that still expose the Original base navigation.
     """
     cookies = {"BbRouter": BbRouter}
     headers = {
@@ -141,6 +202,9 @@ def get_courses(BbRouter: str) -> List[Tuple[str, str]]:
         # expect fullLink to be of form:
         # link javascript:globalNavMenu.goToUrl('/webapps/blackboard/execute/launcher?type=Course&id=_302242_1&url='); return false;
         fullLink = link.get("onclick")
+        if not fullLink:
+            # Ultra base navigation renders plain hrefs with no onclick handler.
+            continue
         matches = re.search(r"type=Course&id=_(\S+)&url=", fullLink)
         if matches is None:
             print("Unable to parse link to get course id: {}".format(fullLink))
@@ -248,8 +312,44 @@ def get_file_download_link(BbRouter: str, link: str) -> str:
     return headers.url
 
 
-def get_download_dir(BbRouter: str, course_name: str, course_id: str):
-    """Return dict with directory structure of downloadable items (documents and lectures)
+def get_download_dir(
+    BbRouter: str, course_name: str, course_id: str, prefer_rest: bool = True,
+    cache=None,
+):
+    """Return dict with directory structure of downloadable items (documents and lectures).
+
+    Tries the REST API first so that Ultra courses work, and falls back to scraping
+    listContent.jsp for legacy Original courses.
+
+    Arguments:
+        BbRouter {str} -- authentication token
+        course_name {str} -- name of course
+        course_id {str} -- course id
+        prefer_rest {bool} -- set False to force the legacy HTML scraper
+    """
+    if prefer_rest:
+        from ntu_learn_downloader import rest
+
+        try:
+            folder, skipped = rest.get_download_dir(
+                BbRouter, course_name, course_id, cache=cache
+            )
+            if skipped:
+                print(
+                    "  note: {} externally hosted item(s) cannot be downloaded "
+                    "(Zoom/Panopto/Kaltura links etc.): {}".format(
+                        len(skipped), ", ".join(skipped[:5])
+                    )
+                )
+            return folder
+        except (rest.RestUnavailable, requests.RequestException, ValueError) as e:
+            print("  REST listing unavailable ({}), falling back to scraper".format(e))
+
+    return get_download_dir_legacy(BbRouter, course_name, course_id)
+
+
+def get_download_dir_legacy(BbRouter: str, course_name: str, course_id: str):
+    """Original course view scraper (listContent.jsp).
 
     Arguments:
         BbRouter {str} -- authentication token
