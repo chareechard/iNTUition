@@ -14,16 +14,19 @@ dependencies. It binds to loopback only - the session token never leaves the mac
 import argparse
 import json
 import os
+import tempfile
+from datetime import datetime
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ntu_learn_downloader import auth
+from ntu_learn_downloader import api as api_mod
+from ntu_learn_downloader import semester as semester_mod
 from ntu_learn_downloader.api import (
     get_courses,
-    is_excluded,
     get_download_dir,
     get_file_download_link,
     get_recorded_lecture_download_link,
@@ -32,6 +35,12 @@ from ntu_learn_downloader import drive
 from ntu_learn_downloader import transcribe as transcribe_mod
 from ntu_learn_downloader.contentcache import ContentCache
 from ntu_learn_downloader.ledger import Ledger
+from ntu_learn_downloader import rnd as rnd_mod
+from ntu_learn_downloader import research as research_mod
+from ntu_learn_downloader import materials as materials_mod
+from ntu_learn_downloader import inbound as inbound_mod
+from ntu_learn_downloader import academic_calendar as cal_mod
+from ntu_learn_downloader import schedule as schedule_mod
 from ntu_learn_downloader.sync import DOWNLOADABLE, PUSHABLE, build_plan, summarize
 from ntu_learn_downloader.utils import download, get_filename_from_url, sanitise_filename
 
@@ -44,18 +53,19 @@ class State:
 
     def __init__(self, download_root: str, prefer_rest: bool = True,
                  drive_folder: str = drive.DEFAULT_ROOT_FOLDER, move: bool = True,
-                 favorites_only: bool = True, exclude=None,
-                 transcribe_model: str = transcribe_mod.DEFAULT_MODEL):
+                 scope: str = api_mod.SCOPE_SEMESTER,
+                 transcribe_model: str = transcribe_mod.DEFAULT_MODEL,
+          cerberus_db: Optional[str] = None):
         self.lock = threading.Lock()
         self.download_root = download_root
         self.prefer_rest = prefer_rest
-        self.favorites_only = favorites_only
-        self.exclude = list(exclude or [])
+        self.scope = scope
         self.transcribe_model = transcribe_model
         self.transcribing = False
         self.transcribe_progress = {"done": 0, "total": 0, "current": "", "pct": 0}
         self._transcriber = None
         self.media_survey: List[Dict] = []
+        self.identity: Optional[Dict] = None
         self.drive_folder = drive_folder
         self.move = move
         self.token: Optional[str] = auth.load_token()
@@ -70,6 +80,67 @@ class State:
         self.push_progress = {"done": 0, "total": 0, "current": "", "pct": 0}
         self.ledger = Ledger(download_root)
         self.cache = ContentCache(download_root)
+        self.schedule = schedule_mod.Schedule(download_root)
+        self.rnd = rnd_mod.Board(download_root)
+        # Ids currently out at the Claude backend, and the last error per id. Research
+        # is per-entry and on demand, so several can be in flight at once.
+        self.researching: set = set()
+        self.research_errors: Dict[str, str] = {}
+        # None = pick whatever is usable, preferring the CLI's own login over a key.
+        self.research_backend: Optional[str] = None
+        # The one setting that sends course content off the machine. On by request;
+        # the panel toggles it and every finding records what was actually shared.
+        self.research_materials = True
+        # Cerberus's flagged-email list, read-only. Absent unless that project is
+        # checked out beside this one, or INTUITION_CERBERUS_DB points at its db.
+        self.cerberus_db: Optional[str] = None
+        # Which academic calendar to resolve teaching weeks against.
+        self.semester_key = semester_mod.format_semester(
+            semester_mod.current_semester())
+
+    def _schedule_snapshot(self) -> Dict:
+        """Everything the Temporal Protocol panel needs, resolved to today."""
+        now = datetime.now()
+        sem = self.semester_key
+        teaching_week = cal_mod.week_of(now.date(), sem)
+        return {
+            "count": len(self.schedule),
+            "imported_at": self.schedule.imported_at,
+            "semester": self.schedule.semester,
+            # The upload prompt is only warranted when there is nothing stored, or
+            # when what is stored belongs to a semester that has since rolled over.
+            # An unstamped schedule (imported before semesters were recorded) counts
+            # as current rather than stale, so it does not nag on every launch.
+            "needs_upload": bool(
+                not len(self.schedule)
+                or (self.schedule.semester and self.schedule.semester != sem)),
+            "current_semester": sem,
+            # Only sessions that actually run this teaching week: "Wk2-13" must not
+            # show up in week 1, and an alternating lab must not show every week.
+            "week": self.schedule.week(teaching_week),
+            "all_week": self.schedule.week(),
+            "teaching_week": teaching_week,
+            "phase": cal_mod.phase_of(now.date(), sem),
+            "exams": self.schedule.exams,
+            "today": now.strftime("%a %d %b %Y"),
+            "day": schedule_mod.DAYS[now.weekday()],
+            "clock": now.strftime("%H:%M:%S"),
+        }
+
+    def refresh_identity(self):
+        """Look up who the session belongs to. Cached: it never changes mid-session."""
+        if not self.token:
+            with self.lock:
+                self.identity = None
+            return None
+        try:
+            from ntu_learn_downloader import rest
+            who = rest.get_me(self.token)
+        except Exception:  # noqa: BLE001 - identity is cosmetic, never block on it
+            who = None
+        with self.lock:
+            self.identity = who
+        return who
 
     def refresh_media(self):
         """Re-read which staged media has a transcript, and where it came from."""
@@ -93,9 +164,11 @@ class State:
             return {
                 "download_root": self.download_root,
                 "prefer_rest": self.prefer_rest,
-                "favorites_only": self.favorites_only,
-                "exclude": self.exclude,
+                "scope": self.scope,
+                "semester": semester_mod.format_semester(
+                    semester_mod.current_semester()),
                 "has_token": bool(self.token),
+                "identity": self.identity,
                 "token_expires": token_expiry,
                 "courses": self.courses,
                 "plan": self.plan,
@@ -119,6 +192,20 @@ class State:
                     "linked": drive.token_present(),
                     "archived": len(self.ledger),
                 },
+                "schedule": self._schedule_snapshot(),
+                "inbound": inbound_mod.snapshot(self.cerberus_db),
+                "rnd": self.rnd.snapshot(),
+                "research": dict(
+                    research_mod.status(self.research_backend),
+                    busy=sorted(self.researching),
+                    errors=dict(self.research_errors),
+                    materials=self.research_materials,
+                    material_caps={"files": materials_mod.MAX_FILES,
+                                   "mb": materials_mod.MAX_TOTAL_BYTES // 1048576},
+                    sandbox=os.path.join(self.download_root,
+                                         research_mod.STORAGE_DIR,
+                                         research_mod.SANDBOX_DIRNAME),
+                ),
                 "log": list(self.log[-40:]),
             }
 
@@ -287,6 +374,72 @@ def do_transcribe(state: State, paths: List[str] = None):
             state.transcribe_progress["current"] = ""
 
 
+def course_codes(state: State) -> List[str]:
+    """Course codes from the scanned course list, e.g. 26S1-SC2002-... -> SC2002."""
+    import re
+    codes = []
+    with state.lock:
+        names = [c.get("name", "") for c in state.courses]
+    for name in names:
+        codes += re.findall(r"[A-Z]{2,4}\d{4}", name.upper())
+    return sorted(set(codes))
+
+
+def do_research(state: State, item_id: str):
+    """Send one board entry to Claude and store the finding on it.
+
+    Only ever reached from an explicit press of Research on that entry. What is sent is
+    built in research.build_prompt - the entry text plus the enrolled course codes, and
+    nothing from the download folder.
+    """
+    item = state.rnd.get(item_id)
+    title = (item or {}).get("title", item_id)
+    try:
+        if item is None:
+            raise research_mod.ResearchError("That entry no longer exists")
+        # Course material is shared only with sharing on, only for this entry's own
+        # course tag, and only for the length of the run.
+        specs, service = [], None
+        if state.research_materials and item.get("course"):
+            specs = materials_mod.select(item["course"], state.download_root,
+                                         ledger=state.ledger)
+            if any(s["local"] is None for s in specs):
+                service = materials_mod.service_for(state.download_root)
+                if service is None:
+                    specs = [s for s in specs if s["local"]]
+                    state.note("Drive not linked; sharing only local material")
+            if specs:
+                state.note("Sharing {} {} file(s) with this run".format(
+                    len(specs), item["course"]))
+
+        state.note("Researching {}".format(title))
+        finding = research_mod.research(item, courses=course_codes(state),
+                                        backend=state.research_backend,
+                                        download_root=state.download_root,
+                                        material_specs=specs, drive_service=service)
+        state.rnd.set_research(item_id, finding)
+        state.rnd.save()
+        with state.lock:
+            state.research_errors.pop(item_id, None)
+        cost = finding.get("cost_usd")
+        shared = finding.get("materials") or []
+        state.note("Research done: {} via {} ({} source(s){}{})".format(
+            title, finding.get("backend", "?"), len(finding["sources"]),
+            ", {} material file(s)".format(len(shared)) if shared else "",
+            ", ${:.4f}".format(cost) if cost else ""))
+    except research_mod.ResearchError as e:
+        with state.lock:
+            state.research_errors[item_id] = str(e)
+        state.note("Research failed for {}: {}".format(title, e))
+    except Exception as e:  # noqa: BLE001 - a thread dying silently is worse
+        with state.lock:
+            state.research_errors[item_id] = str(e)
+        state.note("Research failed for {}: {}".format(title, e))
+    finally:
+        with state.lock:
+            state.researching.discard(item_id)
+
+
 def do_push(state: State):
     """Mirror every locally-held plan entry into Drive, then reclaim the disk."""
     try:
@@ -294,22 +447,11 @@ def do_push(state: State):
             targets = [
                 e for e in state.plan
                 if e["status"] in PUSHABLE and os.path.isfile(e["path"])
-                and not is_excluded(e.get("course", ""), state.exclude)
-                and not is_excluded(e.get("rel_path", ""), state.exclude)
-            ]
-            blocked = [
-                e for e in state.plan
-                if e["status"] in PUSHABLE and os.path.isfile(e["path"])
-                and (is_excluded(e.get("course", ""), state.exclude)
-                     or is_excluded(e.get("rel_path", ""), state.exclude))
             ]
             state.push_progress = {
                 "done": 0, "total": len(targets), "current": "", "pct": 0
             }
 
-        if blocked:
-            state.note("Excluded from Drive ({}): {} file(s) held back".format(
-                ", ".join(state.exclude), len(blocked)))
         if not targets:
             state.note("Nothing on disk to push")
             return
@@ -392,6 +534,53 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send({"error": "not found"}, status=404)
 
+    def do_PUT(self):
+        """Schedule upload. The body is the raw file; ?name= gives its filename."""
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/schedule":
+            self._send({"error": "not found"}, status=404)
+            return
+        state = self.state
+        params = parse_qs(parsed.query)
+        name = (params.get("name") or ["upload.txt"])[0]
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            self._send({"error": "empty upload"}, status=400)
+            return
+        blob = self.rfile.read(length)
+
+        suffix = os.path.splitext(name)[1] or ".txt"
+        tmp = os.path.join(tempfile.gettempdir(),
+                           "intuition_schedule_upload" + suffix)
+        try:
+            with open(tmp, "wb") as f:
+                f.write(blob)
+            result = schedule_mod.parse_file(tmp)
+        except schedule_mod.ScheduleError as e:
+            self._send({"error": str(e)}, status=400)
+            return
+        except Exception as e:  # noqa: BLE001 - report any parse failure to the UI
+            self._send({"error": "Could not read {}: {}".format(name, e)}, status=400)
+            return
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+        if not result["sessions"]:
+            self._send({"error": "No classes found in {}. Expected a STARS "
+                                 "'Course(s) Registered' PDF, a copied timetable "
+                                 "or an .ics export.".format(name)}, status=400)
+            return
+
+        state.schedule.replace(result["sessions"], exams=result.get("exams"),
+                               courses=result.get("courses"),
+                               semester=result.get("semester"))
+        state.schedule.save()
+        state.note("Schedule imported from {}: {} session(s)".format(
+            name, len(result["sessions"])))
+        self._send({"ok": True, "sessions": len(result["sessions"]),
+                    "exams": len(result.get("exams") or [])})
+
     def do_POST(self):
         path = urlparse(self.path).path
         state = self.state
@@ -410,6 +599,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with state.lock:
                 state.token = token
+            threading.Thread(target=state.refresh_identity, daemon=True).start()
             state.note("Session token accepted")
             self._send({"ok": True})
             return
@@ -423,8 +613,67 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"ok": True})
             return
 
+        if path == "/api/rnd":
+            action = payload.get("action")
+            try:
+                if action == "add":
+                    state.rnd.add(payload.get("title", ""),
+                                  course=payload.get("course", ""),
+                                  notes=payload.get("notes", ""),
+                                  link=payload.get("link", ""))
+                elif action == "advance":
+                    state.rnd.advance(payload.get("id", ""))
+                elif action == "update":
+                    state.rnd.update(payload.get("id", ""),
+                                     **{k: payload.get(k) for k in
+                                        ("title", "course", "notes", "link", "status")})
+                elif action == "remove":
+                    state.rnd.remove(payload.get("id", ""))
+                elif action == "research":
+                    item_id = payload.get("id", "")
+                    if state.rnd.get(item_id) is None:
+                        self._send({"error": "no such entry"}, status=404)
+                        return
+                    if research_mod.resolve_backend(state.research_backend) is None:
+                        self._send({"error": "No research backend. Install the Claude "
+                                             "CLI (uses your existing login), or set "
+                                             "an Anthropic API key."}, status=400)
+                        return
+                    with state.lock:
+                        if item_id in state.researching:
+                            self._send({"error": "already researching"}, status=409)
+                            return
+                        state.researching.add(item_id)
+                        state.research_errors.pop(item_id, None)
+                    threading.Thread(target=do_research, args=(state, item_id),
+                                     daemon=True).start()
+                    self._send({"ok": True, "researching": item_id})
+                    return
+                elif action == "materials":
+                    with state.lock:
+                        state.research_materials = bool(payload.get("on"))
+                    state.note("Course materials sharing {}".format(
+                        "on" if state.research_materials else "off"))
+                elif action == "clear_research":
+                    state.rnd.set_research(payload.get("id", ""), None)
+                else:
+                    self._send({"error": "unknown action"}, status=400)
+                    return
+            except ValueError as e:
+                self._send({"error": str(e)}, status=400)
+                return
+            state.rnd.save()
+            self._send({"ok": True, "count": len(state.rnd)})
+            return
+
         # Pushing operates purely on files already on disk, so it must work even when
         # the NTULearn session has expired. Handle it before the session gate below.
+        if path == "/api/schedule":
+            # Body is the raw file; the query string carries the original name so the
+            # extension can pick the parser.
+            self._send({"error": "use PUT with the file body"}, status=405)
+            return
+
         if path == "/api/transcribe":
             with state.lock:
                 if state.transcribing:
@@ -458,8 +707,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 courses = get_courses(
                     state.token, prefer_rest=state.prefer_rest,
-                    favorites_only=state.favorites_only,
-                    exclude=state.exclude,
+                    scope=state.scope,
                 )
             except Exception as e:  # noqa: BLE001
                 self._send({"error": str(e)}, status=500)
@@ -468,7 +716,9 @@ class Handler(BaseHTTPRequestHandler):
                 state.courses = [{"name": n, "id": i} for n, i in courses]
             state.note("Found {} {}".format(
                 len(courses),
-                "favourite course(s)" if state.favorites_only else "course(s)"))
+                "course(s) for " + semester_mod.format_semester(
+                    semester_mod.current_semester())
+                if state.scope == api_mod.SCOPE_SEMESTER else "course(s)"))
             self._send({"ok": True})
             return
 
@@ -519,15 +769,18 @@ def load_page() -> str:
 
 def serve(download_root: str, port: int = DEFAULT_PORT, prefer_rest: bool = True,
           open_browser: bool = True, drive_folder: str = drive.DEFAULT_ROOT_FOLDER,
-          move: bool = True, favorites_only: bool = True, exclude=None,
-          transcribe_model: str = transcribe_mod.DEFAULT_MODEL):
+          move: bool = True, scope: str = api_mod.SCOPE_SEMESTER,
+          transcribe_model: str = transcribe_mod.DEFAULT_MODEL,
+          cerberus_db: Optional[str] = None):
     Handler.state = State(
         os.path.abspath(download_root), prefer_rest=prefer_rest,
-        drive_folder=drive_folder, move=move, favorites_only=favorites_only,
-        exclude=exclude, transcribe_model=transcribe_model,
+        drive_folder=drive_folder, move=move, scope=scope,
+        transcribe_model=transcribe_model,
     )
+    Handler.state.cerberus_db = cerberus_db
     # Populate the transcript survey up front so the UI is accurate before any scan.
     Handler.state.refresh_media()
+    threading.Thread(target=Handler.state.refresh_identity, daemon=True).start()
     server = ThreadingHTTPServer((DEFAULT_HOST, port), Handler)
     url = "http://{}:{}/".format(DEFAULT_HOST, port)
     print("iNTUition: {}".format(url))
@@ -535,9 +788,9 @@ def serve(download_root: str, port: int = DEFAULT_PORT, prefer_rest: bool = True
     print("Drive root:  {}/  ({})".format(
         drive_folder, "move" if move else "copy"))
     print("Scope:       {}".format(
-        "Favourites only" if favorites_only else "all enrolments"))
-    if exclude:
-        print("Excluded:    {}".format(", ".join(exclude)))
+        "current semester (" + semester_mod.format_semester(
+            semester_mod.current_semester()) + ")"
+        if scope == api_mod.SCOPE_SEMESTER else scope))
     if not drive.credentials_present():
         print("Drive not configured - run: "
               "python -m ntu_learn_downloader.drive_push --setup")
@@ -560,6 +813,10 @@ def main():
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument(
+        "--cerberus_db",
+        help="Path to Cerberus's flagged.db, to show flagged NTU mail. Defaults to "
+             "a sibling J.A.R.V.I.S checkout; the panel hides itself if absent.")
+    parser.add_argument(
         "--legacy", action="store_true", help="Force the Original-view HTML scraper"
     )
     parser.add_argument(
@@ -576,15 +833,11 @@ def main():
         help="Copy to Drive instead of moving: keep local files after upload",
     )
     parser.add_argument(
-        "--all_courses",
-        action="store_true",
-        help="Use every enrolment. By default only Favourites are read.",
-    )
-    parser.add_argument(
-        "--exclude",
-        default="",
-        help="Comma separated course-name substrings to keep out of the pipeline "
-             "entirely, e.g. --exclude ML0004",
+        "--scope",
+        default=api_mod.SCOPE_SEMESTER,
+        choices=api_mod.SCOPES,
+        help="Which courses to read: semester (default, derived from today's date) "
+             "or favourites (Ultra stars)",
     )
     parser.add_argument(
         "--transcribe_model",
@@ -599,9 +852,9 @@ def main():
         open_browser=not args.no_browser,
         drive_folder=args.drive_folder,
         move=not args.keep_local,
-        favorites_only=not args.all_courses,
-        exclude=[x for x in args.exclude.split(',') if x.strip()],
+        scope=args.scope,
         transcribe_model=args.transcribe_model,
+        cerberus_db=args.cerberus_db,
     )
 
 

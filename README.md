@@ -66,17 +66,45 @@ replaces the stale copy.
 Options: `--port`, `--legacy`, `--no_browser`. It binds to loopback only, and the session token is
 never sent anywhere except NTULearn.
 
-## Excluding courses
+## Course scope
+
+By default the tool reads **only the courses belonging to the semester in progress**, worked out
+from today's date. No curation, no flags to update each term.
 
 ```
-python -m ntu_learn_downloader.dashboard --download_to NTU --exclude ML0004
-python -m ntu_learn_downloader.drive_push --download_to NTU --exclude ML0004
+--scope semester    # default: courses labelled with the current semester
+--scope favourites  # courses starred in Ultra
 ```
 
-Comma-separated, case-insensitive substrings matched against the course name. Excluded courses
-never enter the pipeline at all — not scanned, not downloaded, not pushed. The guard is applied at
-the course listing *and* again at push time, so a held-back course cannot reach Drive by another
-route.
+There is deliberately no "everything" option. A sync tool that can be pointed at every
+enrolment you have ever had is one mis-click away from dragging years of stale material into
+Drive.
+
+NTU's academic year runs August to July, and the year label names the *starting* year:
+
+| Date | Current semester |
+|---|---|
+| Aug 2026 – Dec 2026 | `26S1` |
+| Jan 2027 – Jul 2027 | `26S2` |
+| Aug 2027 – Dec 2027 | `27S1` |
+
+June–July is the special term; it stays on the outgoing year's S2 until the new S1 begins in
+August.
+
+**Course names are not uniformly formatted**, so a `26S1-` prefix match is not enough. All three
+observed forms are recognised:
+
+```
+26S1-SC2005-OPERATING SYSTEMS                      compact
+AY2026-2027, Semester 1, MH2100 (Calculus III)     verbose
+CC0015-HEALTH & WELLBEING (T002) AY2025/26 SEM 2   trailing
+```
+
+Courses stating no semester at all — PDPA, risk-management and other admin modules — are excluded
+unless you pass `--include_undated`.
+
+Verified against a live account of 45 enrolments: 7 current, 28 from other semesters, 10 undated.
+The 7 matched the hand-curated Favourites list exactly.
 
 ## Transcription (Whisper)
 
@@ -112,6 +140,100 @@ back from Drive, transcribes, uploads the transcript alongside, and discards the
 Measured on an 8-core CPU with `small.en`: ~59 minutes of lecture audio took 29 minutes, roughly 2x
 realtime. `base.en` is faster but noticeably worse on technical vocabulary; `medium.en` is about
 realtime on CPU.
+
+## R&D board and the Claude backend
+
+The R&D panel is a single board across every course — a place to log tools you are thinking of
+building, each with a course tag and a status (`idea → researching → prototyping → built`, plus
+`parked`). It is plain local state in `.ntu_learn_downloader/rnd.json` and works with no network at
+all.
+
+Pressing **research** on one entry sends it to Claude, which searches the web and answers with a
+verdict, prior art with links, the smallest first version worth building, and the likely pitfalls.
+The finding is stored on the entry, so it survives restarts and a semester rollover.
+
+```
+python -m ntu_learn_downloader.research_run --setup      # the two backends, and what each needs
+python -m ntu_learn_downloader.research_run --check      # backend, isolation, then one live call
+python -m ntu_learn_downloader.research_run --list
+python -m ntu_learn_downloader.research_run --id <id>    # or --all for every unresearched entry
+```
+
+### Two backends
+
+| | `cli` (default) | `api` |
+|---|---|---|
+| Needs | Claude Code installed and logged in | `pip install anthropic` + a key |
+| Credential | the login you already have — nothing stored by iNTUition | `ANTHROPIC_API_KEY`, `~/.ntu_learn_downloader/anthropic_key`, or an `ant auth login` profile |
+| Billing | your Claude Code usage | Anthropic API, billed separately from a Claude subscription |
+| Model | `opus` alias, resolved by the CLI | `claude-opus-5`, adaptive thinking, streamed |
+| Cost cap | `--max-budget-usd`, hard, per entry | none (bounded by `max_tokens`) |
+
+Pick one with `--backend cli|api` or `INTUITION_RESEARCH_BACKEND`; otherwise the CLI is used when
+installed and the API otherwise. Either way only the *name* of the active credential appears in the
+UI, never its value.
+
+### The isolated research session (cli backend)
+
+"Independent of the terminal and other channels" is enforced by the flags in
+`research.build_cli_command`, each of which has a test asserting it is passed:
+
+| Flag | Effect |
+|---|---|
+| `--safe-mode` | no CLAUDE.md, skills, plugins, hooks, custom agents, output styles or MCP servers — none of your Claude Code setup reaches it |
+| `--strict-mcp-config` (no `--mcp-config`) | zero MCP servers, belt and braces |
+| `--no-session-persistence` | nothing written to the session store: the run cannot be resumed and never shows up in `claude -c` or `--resume` |
+| `--tools "WebSearch,WebFetch"` | the built-in tool set is pinned to the two web tools — no Bash, Read, Edit, Write or Task |
+| `--allowed-tools WebSearch WebFetch` | pre-approves exactly those, since print mode has no human to ask |
+| `--permission-mode dontAsk` | anything else is refused outright rather than hanging on a prompt |
+| `--system-prompt` | replaces the coding-agent prompt entirely — a researcher, not an engineer with your filesystem |
+| `--max-budget-usd` | hard per-entry ceiling |
+| cwd | an empty sandbox at `<download_root>/.ntu_learn_downloader/research/`, not the repo and not your course tree |
+
+`--dangerously-skip-permissions` is never passed, and a test asserts it never will be. If a tool is
+denied anyway, the finding says so in the text rather than passing an unsourced answer off as
+researched. The CLI returns prose rather than content blocks, so citations are the links it printed.
+
+**What leaves the machine, and what does not.** This is the only part of iNTUition that talks to a
+third party other than NTULearn and Drive, so the boundary is deliberately narrow:
+
+| Always sent | Sent only with materials sharing on | Never sent |
+|---|---|---|
+| The entry you typed: title, notes, link, course tag | A capped selection of readable files for **that entry's course tag** | Material for any other course |
+| The course codes you are enrolled in | Transcripts, slides, handouts — staged, then deleted | Videos and audio (skipped: unreadable, enormous) |
+| — | Whatever the model chooses to read from the sandbox | Your session token, or anything from another course's folder |
+
+**Materials sharing is a toggle in the panel, and it changes the boundary.** With it off, only the
+first column leaves the machine. With it on, `materials.select` picks at most 12 files totalling at
+most 12 MB for the entry's own course — transcripts ranked above documents — copies them into the
+sandbox, and deletes them when the run ends (in a `finally`, so a crash cleans up too). Every finding
+records exactly which files it read, so it stays auditable after the fact. Files already moved to
+Drive are pulled back for the run.
+
+The prompt is assembled in one place, `research.build_prompt`, so it can be read in full in a few
+lines; tests assert a path or filename on an entry reaches neither the prompt nor the CLI's argv, and
+that read tools appear only when material was actually staged. Nothing is ever sent on a scan, a poll,
+or a page load — only on that press, per entry.
+
+## Inbound (optional)
+
+If Cerberus — a separate, private email-triage project — is checked out beside this one, the
+dashboard shows an **Inbound** panel: NTU mail it flagged as
+needing action (scholarship milestones, URECA, recruiting deadlines), most urgent first, beside the
+teaching week.
+
+The coupling is the weakest kind available. `inbound.py` opens `cerberus/storage/flagged.db` with
+SQLite's `mode=ro` URI, so a bug here cannot mark something done or delete a row — Cerberus stays the
+only writer of its own state. Neither project imports the other; the file path is the whole interface,
+overridable with `--cerberus_db` or `INTUITION_CERBERUS_DB`. Email **bodies are never read** — subject,
+sender, priority and the one-line reason are enough to decide whether to open the mail, and a test
+asserts `body_content` never reaches the payload. If the database is absent, locked, corrupt or on an
+older schema, the panel hides itself rather than failing a poll.
+
+Both projects drive the Claude CLI through the same `claude_bridge` module, which owns the isolation
+flags. Cerberus carries a vendored copy (it runs standalone and cannot import this package);
+`tools/check_vendored.py` and a test fail on drift, because a copy that quietly loses a flag is the
+entire risk that module exists to prevent.
 
 ## Google Drive pipeline
 
@@ -265,7 +387,10 @@ python main.py --sem 20S1 --download_to NTU
 python -m pytest ntu_learn_downloader/tests
 ```
 
-The fixture HTTP server is started by the session fixture in `conftest.py`. (The suite previously
+292 tests, no network: both research backends are exercised against a fake client and a fake
+subprocess runner, so the suite never issues a billed call and never spawns the CLI. The isolation
+flags are pinned by tests — if a future edit drops `--no-session-persistence` or widens `--tools`,
+the suite fails. The fixture HTTP server is started by the session fixture in `conftest.py`. (The suite previously
 relied on nose's `setup_package` hook, which pytest ignores and which no longer runs on modern
 Python.)
 

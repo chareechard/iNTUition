@@ -103,3 +103,8 @@ NTU/
 .ntu_learn_downloader/
 drive_ledger.json
 content_cache.json
+
+# Personal documents dropped in the repo root for one-off imports. The STARS
+# registration PDF carries your name and enrolments; parse it, don't publish it.
+Course(s) Registered*.pdf
+*.webp
