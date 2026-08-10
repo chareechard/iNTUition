@@ -55,7 +55,7 @@ class State:
                  drive_folder: str = drive.DEFAULT_ROOT_FOLDER, move: bool = True,
                  scope: str = api_mod.SCOPE_SEMESTER,
                  transcribe_model: str = transcribe_mod.DEFAULT_MODEL,
-          cerberus_db: Optional[str] = None):
+                 cerberus_db: Optional[str] = None):
         self.lock = threading.Lock()
         self.download_root = download_root
         self.prefer_rest = prefer_rest
@@ -91,9 +91,9 @@ class State:
         # The one setting that sends course content off the machine. On by request;
         # the panel toggles it and every finding records what was actually shared.
         self.research_materials = True
-        # Cerberus's flagged-email list, read-only. Absent unless that project is
-        # checked out beside this one, or INTUITION_CERBERUS_DB points at its db.
-        self.cerberus_db: Optional[str] = None
+        # An explicit flag store to read. When unset, the reader prefers iNTUition's
+        # own triage.db and falls back to a sibling Cerberus checkout.
+        self.cerberus_db: Optional[str] = cerberus_db
         # Which academic calendar to resolve teaching weeks against.
         self.semester_key = semester_mod.format_semester(
             semester_mod.current_semester())
@@ -193,7 +193,8 @@ class State:
                     "archived": len(self.ledger),
                 },
                 "schedule": self._schedule_snapshot(),
-                "inbound": inbound_mod.snapshot(self.cerberus_db),
+                "inbound": inbound_mod.snapshot(
+                    inbound_mod.resolve_path(self.download_root, self.cerberus_db)),
                 "rnd": self.rnd.snapshot(),
                 "research": dict(
                     research_mod.status(self.research_backend),

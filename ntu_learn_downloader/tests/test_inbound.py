@@ -34,8 +34,12 @@ class TestInbound(unittest.TestCase):
         inbound._CACHE.clear()
 
     def tearDown(self):
+        # Restore, or remove if it was never set - leaving it behind leaks into every
+        # later test, since resolve_path consults it before the local store.
         if self._env is not None:
             os.environ["INTUITION_CERBERUS_DB"] = self._env
+        else:
+            os.environ.pop("INTUITION_CERBERUS_DB", None)
         inbound._CACHE.clear()
 
     def test_absent_database_is_not_an_error(self):

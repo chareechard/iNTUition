@@ -33,6 +33,27 @@ PRIORITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3,
 MAX_ROWS = 12
 
 
+def resolve_path(download_root: Optional[str] = None,
+                 configured: Optional[str] = None) -> str:
+    """Which store to read, in order of authority.
+
+    iNTUition's own triage store wins when it exists: once this project is doing the
+    triaging, the Cerberus database is the legacy one. An explicit path beats both,
+    which is what makes the changeover a flag rather than a migration.
+    """
+    if configured:
+        return configured
+    env = (os.environ.get("INTUITION_CERBERUS_DB") or "").strip()
+    if env:
+        return env
+    if download_root:
+        from ntu_learn_downloader import triage_store
+        own = triage_store.db_path(download_root)
+        if os.path.isfile(own):
+            return own
+    return default_path()
+
+
 def default_path(projects_dir: Optional[str] = None) -> str:
     """Where to look when nothing is configured."""
     env = (os.environ.get("INTUITION_CERBERUS_DB") or "").strip()
