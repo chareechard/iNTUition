@@ -17,8 +17,13 @@ from ntu_learn_downloader import drive
 from ntu_learn_downloader.ledger import STORAGE_DIR, Ledger
 
 
-def collect_files(download_root: str) -> List[Dict]:
-    """Every real file under the download root, excluding tool bookkeeping."""
+def collect_files(download_root: str, exclude: List[str] = None) -> List[Dict]:
+    """Every real file under the download root, excluding tool bookkeeping.
+
+    ``exclude`` holds case-insensitive substrings matched against the file's path
+    relative to the root, so a whole course folder can be held back from Drive.
+    """
+    exclude = [e.strip().upper() for e in (exclude or []) if e.strip()]
     found: List[Dict] = []
     for dirpath, dirnames, filenames in os.walk(download_root):
         # Do not upload our own state directory.
@@ -28,6 +33,9 @@ def collect_files(download_root: str) -> List[Dict]:
             if filename.startswith("."):
                 continue
             full = os.path.join(dirpath, filename)
+            rel = os.path.relpath(full, download_root)
+            if any(pat in rel.upper() for pat in exclude):
+                continue
             found.append(
                 {
                     "path": full,
@@ -125,6 +133,11 @@ def main():
     parser.add_argument(
         "--dry_run", action="store_true", help="List what would be pushed and exit"
     )
+    parser.add_argument(
+        "--exclude",
+        default="",
+        help="Comma separated path substrings never to upload, e.g. --exclude ML0004",
+    )
     parser.add_argument("--setup", action="store_true", help="Print credential setup steps")
     parser.add_argument(
         "--check",
@@ -147,7 +160,10 @@ def main():
         return 1
 
     ledger = Ledger(root)
-    files = collect_files(root)
+    exclude = [x for x in args.exclude.split(',') if x.strip()]
+    all_found = collect_files(root)
+    files = collect_files(root, exclude=exclude)
+    held = len(all_found) - len(files)
     if not files:
         print("Nothing to push in {}".format(root))
         return 0
@@ -155,6 +171,9 @@ def main():
     total = sum(f["size"] for f in files)
     print("{} file(s), {} to push from {}".format(len(files), human(total), root))
     print("Destination: Drive/{}/".format(args.drive_folder))
+    if exclude:
+        print("Excluded:    {} ({} file(s) held back)".format(
+            ", ".join(exclude), held))
     if args.keep_local:
         print("Mode: copy (local files kept)")
     else:

@@ -8,3 +8,6 @@ pytest>=7.0
 # Google Drive pipeline (optional; only needed for drive_push / the dashboard's Push button)
 google-api-python-client>=2.0
 google-auth-oauthlib>=1.0
+
+# Transcription (optional; only needed for transcribe_run / the dashboard's Whisper button)
+faster-whisper>=1.0

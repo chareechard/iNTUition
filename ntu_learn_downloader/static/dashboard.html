@@ -286,6 +286,17 @@ code { color: var(--cyan); }
 </section>
 
 <section class="panel" id="drivePanel">
+  <h2>Transcription</h2>
+  <div id="mediaList" style="margin-bottom:12px"></div>
+  <div class="row" style="margin-bottom:12px">
+    <button id="transcribe">Run Whisper</button>
+    <button id="trAll">Select all</button>
+    <button id="trNone">Clear</button>
+    <span class="muted" id="transcribeState"></span>
+  </div>
+  <div class="bar" id="trBarWrap" style="display:none"><i id="trBar"></i></div>
+  <p class="hint" id="transcribeHint" style="margin:0 0 18px"></p>
+
   <h2>Drive relay</h2>
   <div class="row" style="margin-bottom:12px">
     <button class="primary" id="push">Push to Drive</button>
@@ -306,6 +317,7 @@ code { color: var(--cyan); }
 const $ = (id) => document.getElementById(id);
 let STATE = null;
 const picked = new Set();
+const trPicked = new Set();
 
 async function api(path, body) {
   const r = await fetch(path, {
@@ -393,12 +405,68 @@ function render(s) {
     $('dlState').textContent = '';
   }
 
+  renderTranscribe(s);
   renderDrive(s);
 
   const logText = (s.log || []).map(l => '› ' + l).join('\n') || 'awaiting link…';
   if ($('log').textContent !== logText) {
     $('log').textContent = logText;
     $('log').scrollTop = $('log').scrollHeight;
+  }
+}
+
+let sigMedia = null;
+
+function renderTranscribe(s) {
+  const t = s.transcribe || {};
+  const media = t.media || [];
+  const missing = media.filter(m => m.status === 'missing');
+  const provided = media.filter(m => m.status === 'provided');
+
+  // Only rebuild when the survey actually changes, so checkboxes survive polling.
+  const sig = JSON.stringify(media.map(m => [m.path, m.status]));
+  if (sig !== sigMedia) {
+    sigMedia = sig;
+    // Anything the course already supplies a transcript for is shown but locked:
+    // regenerating it would waste CPU and produce a worse copy.
+    $('mediaList').innerHTML = media.length ? media.map(m => {
+      const lock = m.status === 'provided';
+      const tag = {missing: 'no transcript', provided: 'course transcript',
+                   generated: 'whisper done'}[m.status];
+      const cls = {missing: 'new', provided: 'archived', generated: 'current'}[m.status];
+      return `<label class="course" title="${esc(m.rel_path)}">
+        <input type="checkbox" class="mbox" data-path="${esc(m.path)}"
+               ${trPicked.has(m.path) ? 'checked' : ''} ${lock ? 'disabled' : ''}>
+        <span style="flex:1">${esc(m.name)}<br>
+          <span class="tag ${cls}">${tag}</span>
+          <span class="muted"> ${(m.size/1048576).toFixed(1)} MB</span>
+          ${m.sources.length ? `<span class="muted"> · ${esc(m.sources.join(', '))}</span>` : ''}
+        </span></label>`;
+    }).join('') : '<span class="muted" style="font-size:12px">No media staged.</span>';
+  }
+
+  $('transcribe').disabled = s.transcribing || s.downloading || !trPicked.size;
+  $('trAll').disabled = !missing.length;
+
+  // Transcripts must be produced while the video is still staged: move mode deletes
+  // the local copy once Drive confirms it.
+  $('transcribeHint').innerHTML = media.length
+    ? `${missing.length} without a transcript, ${provided.length} already supplied by the `
+      + `course. Whisper <code>${esc(t.model || '')}</code> writes .vtt + .txt beside each `
+      + `selected file, so they relay to Drive together. Run <b>before</b> Push.`
+    : `No staged media. Videos already in Drive? Use <code>--backfill</code>.`;
+
+  const tp = s.transcribe_progress || {};
+  $('trBarWrap').style.display = s.transcribing ? '' : 'none';
+  if (s.transcribing && tp.total) {
+    const overall = ((tp.done + (tp.pct || 0) / 100) / tp.total) * 100;
+    $('trBar').style.width = Math.min(100, Math.round(overall)) + '%';
+    $('transcribeState').textContent =
+      `${tp.done}/${tp.total} · ${tp.pct || 0}% · ${tail(tp.current, 28)}`;
+    $('transcribeState').className = 'scanning';
+  } else {
+    $('transcribeState').textContent = '';
+    $('transcribeState').className = 'muted';
   }
 }
 
@@ -495,6 +563,30 @@ $('pickChanged').onclick = () => {
 $('pickNone').onclick = () => { picked.clear(); renderPlan(STATE); syncQueueUi(); };
 $('download').onclick = async () => {
   try { await api('/api/download', {paths: [...picked]}); await refresh(); }
+  catch (e) { alert(e.message); }
+};
+$('trAll').onclick = () => {
+  ((STATE.transcribe||{}).media||[]).forEach(m => {
+    if (m.status !== 'provided') trPicked.add(m.path);
+  });
+  sigMedia = null; renderTranscribe(STATE);
+};
+$('trNone').onclick = () => { trPicked.clear(); sigMedia = null; renderTranscribe(STATE); };
+document.addEventListener('change', (ev) => {
+  if (!ev.target.classList.contains('mbox')) return;
+  const p = ev.target.dataset.path;
+  ev.target.checked ? trPicked.add(p) : trPicked.delete(p);
+  $('transcribe').disabled = !trPicked.size;
+});
+$('transcribe').onclick = async () => {
+  const n = trPicked.size;
+  const model = (STATE.transcribe || {}).model || '';
+  if (!confirm(`Transcribe ${n} selected file(s) with Whisper ${model}?
+
+`
+      + `Runs locally on CPU — roughly 3-5x realtime, so an hour of lecture `
+      + `takes ~15-20 minutes. The first run downloads the model.`)) return;
+  try { await api('/api/transcribe', {paths: [...trPicked]}); await refresh(); }
   catch (e) { alert(e.message); }
 };
 $('push').onclick = async () => {

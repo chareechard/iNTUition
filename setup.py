@@ -26,6 +26,7 @@ setuptools.setup(
     # Drive support is optional; the rest of the tool runs without it.
     extras_require={
         "drive": ["google-api-python-client>=2.0", "google-auth-oauthlib>=1.0"],
+        "transcribe": ["faster-whisper>=1.0"],
     },
 )
 

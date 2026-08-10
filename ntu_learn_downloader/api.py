@@ -1,5 +1,5 @@
 import re
-from typing import List, Tuple, Union, Dict
+from typing import List, Optional, Tuple, Union, Dict
 from urllib.parse import parse_qs, urlencode, urlparse
 import json
 
@@ -116,8 +116,21 @@ def _authenticate_adfs_legacy(username: str, password: str) -> str:
     return BbRouter
 
 
+def is_excluded(course_name: str, exclude: Optional[List[str]]) -> bool:
+    """Case-insensitive substring match of a course name against exclusion patterns.
+
+    Used at every stage that could put material into Drive, not just at listing time,
+    so an excluded course cannot slip through by another route.
+    """
+    if not exclude:
+        return False
+    upper = (course_name or "").upper()
+    return any(pattern.strip().upper() in upper for pattern in exclude if pattern.strip())
+
+
 def get_courses(
-    BbRouter: str, prefer_rest: bool = True, favorites_only: bool = True
+    BbRouter: str, prefer_rest: bool = True, favorites_only: bool = True,
+    exclude: Optional[List[str]] = None,
 ) -> List[Tuple[str, str]]:
     """Return list of courses that user is currently reading.
 
@@ -139,7 +152,7 @@ def get_courses(
         try:
             courses = rest.get_courses(BbRouter, favorites_only=favorites_only)
             if courses:
-                return courses
+                return [c for c in courses if not is_excluded(c[0], exclude)]
         except (rest.RestUnavailable, requests.RequestException, ValueError) as e:
             if favorites_only:
                 # The legacy scraper has no concept of Favourites, so falling back
@@ -158,7 +171,7 @@ def get_courses(
             "concept. Use --all_courses with --legacy, or drop --legacy."
         )
 
-    return get_courses_legacy(BbRouter)
+    return [c for c in get_courses_legacy(BbRouter) if not is_excluded(c[0], exclude)]
 
 
 def get_courses_legacy(BbRouter: str) -> List[Tuple[str, str]]:
