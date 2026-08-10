@@ -200,7 +200,7 @@ class TestRest(unittest.TestCase):
                    lambda *a, **k: FakeResponse({"results": []})):
             with self.assertRaises(rest.RestUnavailable) as ctx:
                 rest.get_favorite_courses(BbRouter)
-        self.assertIn("--all_courses", str(ctx.exception))
+        self.assertIn("--scope favourites", str(ctx.exception))
 
     def test_get_courses_all_uses_public_api_and_skips_disabled(self):
         with patch("ntu_learn_downloader.rest.requests.get", fake_get):

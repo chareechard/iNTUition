@@ -58,10 +58,10 @@ parser.add_argument(
     help="Force the legacy Original-course-view HTML scraper instead of the REST API",
 )
 parser.add_argument(
-    "--all_courses",
-    action="store_true",
-    help="Use every enrolment. By default only courses starred as Favourites in "
-    "NTULearn are read.",
+    "--scope",
+    default="semester",
+    choices=("semester", "favourites"),
+    help="Which courses to read: semester (default, from today's date) or favourites",
 )
 
 # Other flags
@@ -221,12 +221,12 @@ if __name__ == "__main__":
         sys.exit(1)
 
     prefer_rest = not args.legacy
-    favorites_only = not args.all_courses
+    scope = args.scope
 
-    print("your {}:".format("Favourites" if favorites_only else "courses"))
+    print("your courses ({}):".format(scope))
     try:
         courses = get_courses(
-            bbrouter, prefer_rest=prefer_rest, favorites_only=favorites_only
+            bbrouter, prefer_rest=prefer_rest, scope=scope
         )
     except auth.AuthenticationError as e:
         print(e)

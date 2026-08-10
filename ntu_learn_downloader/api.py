@@ -18,6 +18,7 @@ from ntu_learn_downloader.constants import (
     NTULEARN_URL,
     SAML_SSO_URL,
 )
+from ntu_learn_downloader import semester
 from ntu_learn_downloader.auth import AuthenticationError, HOW_TO_GET_TOKEN
 from ntu_learn_downloader.utils import (
     get_content_id_from_listContent_url,
@@ -116,62 +117,93 @@ def _authenticate_adfs_legacy(username: str, password: str) -> str:
     return BbRouter
 
 
-def is_excluded(course_name: str, exclude: Optional[List[str]]) -> bool:
-    """Case-insensitive substring match of a course name against exclusion patterns.
-
-    Used at every stage that could put material into Drive, not just at listing time,
-    so an excluded course cannot slip through by another route.
-    """
-    if not exclude:
-        return False
-    upper = (course_name or "").upper()
-    return any(pattern.strip().upper() in upper for pattern in exclude if pattern.strip())
+# How the course list is narrowed. There is deliberately no "everything" option: a
+# sync tool that can be pointed at every enrolment you have ever had is one mis-click
+# away from dragging years of stale material into Drive.
+SCOPE_SEMESTER = "semester"      # courses labelled with the semester in progress today
+SCOPE_FAVOURITES = "favourites"  # courses starred in Ultra
+SCOPES = (SCOPE_SEMESTER, SCOPE_FAVOURITES)
 
 
 def get_courses(
-    BbRouter: str, prefer_rest: bool = True, favorites_only: bool = True,
-    exclude: Optional[List[str]] = None,
+    BbRouter: str, prefer_rest: bool = True, favorites_only: bool = None,
+    scope: str = SCOPE_SEMESTER,
+    today=None, include_undated: bool = False,
 ) -> List[Tuple[str, str]]:
-    """Return list of courses that user is currently reading.
+    """Return the courses in scope, as [(course name, course_id)].
 
-    Restricted to Ultra Favourites by default. Tries the Blackboard REST API first
-    (works for Ultra and Original courses), and falls back to scraping the Original-view
-    global nav menu only when the full list was requested.
+    Scope defaults to the semester currently in progress, derived from today's date and
+    the semester label in each course name. That stays correct on its own as terms roll
+    over, unlike Ultra's Favourites star which has to be re-curated by hand.
 
     Arguments:
         BbRouter {str} -- authentication token
         prefer_rest {bool} -- set False to force the legacy HTML scraper
-        favorites_only {bool} -- restrict to courses starred as Favourites in Ultra
+        scope {str} -- "semester" (default), "favourites", or "all"
+        today {date} -- override the reference date, for testing
+        include_undated {bool} -- under semester scope, also keep courses whose name
+            states no semester at all (admin and compliance modules, mostly)
+        favorites_only {bool} -- deprecated alias; True maps to scope="favourites"
 
     Returns:
         List[Tuple[str, str]] -- list of tuples (course name, course_id)
     """
+    # Back-compat for the previous boolean flag. False no longer means "everything";
+    # it simply leaves the default semester scope in place.
+    if favorites_only is True:
+        scope = SCOPE_FAVOURITES
+    if scope not in SCOPES:
+        raise ValueError("Unknown scope {!r}, expected one of {}".format(scope, SCOPES))
+
+    def narrow(courses):
+        if scope != SCOPE_SEMESTER:
+            return courses
+        kept = []
+        for name, cid in courses:
+            parsed = semester.parse_course_semester(name)
+            if parsed == semester.current_semester(today):
+                kept.append((name, cid))
+            elif parsed is None and include_undated:
+                kept.append((name, cid))
+        return kept
+
     if prefer_rest:
         from ntu_learn_downloader import rest
 
         try:
-            courses = rest.get_courses(BbRouter, favorites_only=favorites_only)
+            # Semester scope needs the full enrolment list to filter from; only the
+            # favourites scope asks the server to narrow it.
+            courses = rest.get_courses(
+                BbRouter, favorites_only=(scope == SCOPE_FAVOURITES))
             if courses:
-                return [c for c in courses if not is_excluded(c[0], exclude)]
+                narrowed = narrow(courses)
+                if not narrowed and scope == SCOPE_SEMESTER:
+                    raise AuthenticationError(
+                        "No courses are labelled {} (the semester in progress). "
+                        "Checked {} enrolment(s). Use --scope favourites if your "
+                        "courses are named differently, or --include_undated to keep "
+                        "unlabelled ones.".format(
+                            semester.format_semester(semester.current_semester(today)),
+                            len(courses)))
+                return narrowed
         except (rest.RestUnavailable, requests.RequestException, ValueError) as e:
-            if favorites_only:
-                # The legacy scraper has no concept of Favourites, so falling back
-                # would silently return every enrolment instead of the starred few.
-                # Refuse rather than quietly widen what gets downloaded.
+            if scope == SCOPE_FAVOURITES:
+                # The scraper has no notion of a starred course, so falling back would
+                # silently return every enrolment instead of the chosen few.
                 raise AuthenticationError(
                     "Could not read your Favourites ({}).\n"
-                    "Star courses on the NTULearn Courses page, or pass --all_courses "
-                    "to use every enrolment instead.".format(e)
-                )
+                    "Drop --scope favourites to use the current semester instead."
+                    .format(e))
             print("REST course listing unavailable ({}), falling back to scraper".format(e))
 
-    if favorites_only and not prefer_rest:
+    if scope == SCOPE_FAVOURITES and not prefer_rest:
         raise AuthenticationError(
-            "--legacy cannot read Favourites: the Original-view scraper has no such "
-            "concept. Use --all_courses with --legacy, or drop --legacy."
-        )
+            "--legacy cannot read Favourites: the Original-view scraper does not "
+            "expose them. Drop --scope favourites, or drop --legacy.")
 
-    return [c for c in get_courses_legacy(BbRouter) if not is_excluded(c[0], exclude)]
+    # The scraper is reached only under semester scope, where narrow() applies the same
+    # filter to whatever it returns - so this fallback cannot widen the scope.
+    return narrow(get_courses_legacy(BbRouter))
 
 
 def get_courses_legacy(BbRouter: str) -> List[Tuple[str, str]]:

@@ -36,6 +36,7 @@ GET_CONTENT_LIST_URL = (
 REST_BASE_URL = NTULEARN_URL + "/learn/api/public"
 REST_VERSION_URL = REST_BASE_URL + "/v1/system/version"
 REST_MY_COURSES_URL = REST_BASE_URL + "/v1/users/me/courses"
+REST_ME_URL = REST_BASE_URL + "/v1/users/me"
 
 # Ultra's *internal* API. Not part of the documented public contract, but it is the only
 # place the Favourites (starred courses) flag is exposed - the public

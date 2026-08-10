@@ -23,6 +23,7 @@ from ntu_learn_downloader.constants import (
     REST_CONTENT_CHILDREN_URL,
     REST_COURSE_CONTENTS_URL,
     REST_INTERNAL_MEMBERSHIPS_URL,
+    REST_ME_URL,
     REST_MY_COURSES_URL,
     REST_VERSION_URL,
 )
@@ -114,6 +115,37 @@ def is_available(BbRouter: str) -> bool:
         return False
 
 
+def get_me(BbRouter: str) -> Dict:
+    """Who this session belongs to.
+
+    NTU populates these fields unusually: ``name.given`` holds the school code
+    (e.g. "SPMS") and ``name.family`` holds the person's full name. Verified live.
+    So the display name is taken from ``family``, with ``given`` surfaced separately
+    as the unit rather than glued on the front.
+    """
+    me = _get(BbRouter, REST_ME_URL)
+    if not me:
+        raise RestUnavailable("Could not read the signed-in user")
+
+    name = me.get("name") or {}
+    family = (name.get("family") or "").strip()
+    given = (name.get("given") or "").strip()
+    username = (me.get("userName") or "").strip()
+
+    display = family or given or username or "unknown"
+    roles = [r for r in (me.get("institutionRoleIds") or []) if r]
+    # NTU_All / NTU_Student are plumbing; STUDENT and the like are the useful ones.
+    role = next((r for r in roles if not r.upper().startswith("NTU_")), roles[0] if roles else "")
+
+    return {
+        "display": display,
+        "unit": given,
+        "username": username,
+        "role": role.replace("_", " ").title() if role else "",
+        "id": me.get("id"),
+    }
+
+
 def get_favorite_courses(BbRouter: str) -> List[Tuple[str, str]]:
     """Return [(course name, course id)] for courses starred as Favourites in Ultra.
 
@@ -144,7 +176,7 @@ def get_favorite_courses(BbRouter: str) -> List[Tuple[str, str]]:
     if not courses:
         raise RestUnavailable(
             "No Favourites found. Star the courses you want in NTULearn "
-            "(Courses page -> the star on each card), or run with --all_courses."
+            "(Courses page -> the star on each card), or drop --scope favourites."
         )
     return courses
 
