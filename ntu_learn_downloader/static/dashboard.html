@@ -1,9 +1,13 @@
 <!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>iNTUition</title>
+<link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+<script defer src="/static/vendor/katex/katex.min.js"></script>
+<script defer src="/static/vendor/katex/contrib/auto-render.min.js" onload="renderNeuralMath()"></script>
 <style>
 /* ── HUD palette ──────────────────────────────────────────────────────────────
    Deliberately single-theme: this is a heads-up display, so it commits to dark
@@ -58,7 +62,10 @@ body {
   color: var(--ink);
   font: 13px/1.55 var(--mono);
   letter-spacing: .01em;
+  transition:padding-right .2s ease;
 }
+:root { --material-drawer-width:min(720px,46vw); }
+body.materialOpen { padding-right:var(--material-drawer-width); }
 
 /* ── Panel: thin frame with bright L-brackets at all four corners ───────────
    Eight gradients on one pseudo-element draws every corner without extra
@@ -67,7 +74,7 @@ body {
   position: relative;
   background: var(--panel);
   border: 1px solid var(--line);
-  padding: 16px 18px 18px;
+  padding: 14px 15px 16px;
 }
 .panel::before {
   content: ""; position: absolute; inset: -1px; pointer-events: none;
@@ -93,8 +100,7 @@ h2 {
   border-bottom: 1px solid var(--line);
 }
 h2::after {
-  content: "▬ ▪"; margin-left: auto; font-size: 8px; letter-spacing: .1em;
-  color: var(--cyan-dim);
+  content: ""; margin-left:auto; height:1px; flex:1; background:linear-gradient(90deg,var(--line),transparent);
 }
 
 /* ── Header ─────────────────────────────────────────────────────────────── */
@@ -135,6 +141,7 @@ header {
 .segs i.off { background: rgba(255,122,112,.35); }
 
 .chips { display: flex; gap: 9px; }
+.headerSync { display:flex; align-items:center; }
 .chip {
   border: 1px solid var(--line); padding: 9px 11px; min-width: 42px;
   text-align: center; line-height: 1.2;
@@ -149,45 +156,96 @@ header {
 
 /* ── Layout: three columns, mirroring the reference ─────────────────────── */
 main {
-  flex: 1; width: 100%; max-width: 1560px; margin: 0 auto;
-  padding: 18px 26px 26px;
-  display: grid; gap: 16px;
-  grid-template-columns: 330px minmax(0, 1fr) 350px;
+  flex: 1; width: 100%; max-width: 1600px; margin: 0 auto;
+  padding: 14px 16px 20px;
+  display: grid; column-gap: 12px; row-gap: 12px;
+  grid-template-columns: minmax(230px, .82fr) minmax(360px, 1.3fr) minmax(250px, .9fr);
   grid-template-areas:
-    "gate     gate      gate"
-    "courses  manifest  temporal"
-    "system   manifest  transcribe"
-    "system   manifest  drive"
-    "rnd      rnd       console";
+    "gate     gate     gate"
+    "inbound  todo     temporal"
+    "priority priority priority"
+    "rnd      labs     courses"
+    "manifest transcribe drive"
+    "system   console  console";
+  grid-template-rows: auto var(--command-row-height, minmax(220px, auto)) auto var(--command-row-height, minmax(220px, auto)) auto auto;
   align-content: start;
 }
-@media (max-width: 1300px) {
-  main { grid-template-columns: minmax(0, 1fr) 340px;
+@media (min-width: 901px) and (max-width: 1099px) {
+  main { grid-template-columns: minmax(0, 1fr) minmax(340px, .72fr);
+         padding: 18px; gap: 16px;
          grid-template-areas:
            "gate      gate"
-           "courses   temporal"
-           "manifest  temporal"
-           "manifest  transcribe"
-           "manifest  drive"
-           "rnd       rnd"
-           "system    console"; }
+           "todo      inbound"
+           "temporal  temporal"
+           "priority  priority"
+           "rnd       labs"
+           "courses   manifest"
+           "transcribe drive"
+           "system    console"
+         grid-template-rows: auto 360px auto auto 230px auto auto auto; }
 }
 @media (max-width: 900px) {
   /* No "top right" in one column, so the calendar takes the nearest equivalent:
      straight under the header, above everything operational. */
-  main { grid-template-columns: 1fr;
-         grid-template-areas: "gate" "temporal" "courses" "manifest" "transcribe"
-                              "drive" "rnd" "system" "console"; }
+  main { grid-template-columns: minmax(0, 1fr); padding: 18px 14px 28px; gap: 18px;
+         grid-template-areas: "gate" "temporal" "todo" "inbound" "priority"
+                              "rnd" "labs" "courses" "manifest" "transcribe"
+                              "drive" "system" "console";
+         grid-template-rows: none; }
 }
 #authSection   { grid-area: gate; }
-#coursePanel   { grid-area: courses; align-self: start; }
+#priorityPanel { grid-area: priority; min-width: 0; }
+#coursePanel   { grid-area: courses; align-self: start; min-width: 0; overflow-x: hidden; }
 #systemPanel   { grid-area: system; align-self: start; }
-#manifestPanel { grid-area: manifest; min-width: 0; }
+#manifestPanel { grid-area: manifest; min-width:0; align-self:start; display:flex; flex-direction:column; }
+#manifestPanel .tablewrap { flex:1 1 auto; min-height:0; max-height:min(42vh,420px); }
 #temporalPanel { grid-area: temporal; align-self: start; }
 #transcribePanel { grid-area: transcribe; align-self: start; }
 #drivePanel    { grid-area: drive; align-self: start; }
+#inboundPanel  { grid-area: inbound; align-self: start; min-width: 0; }
+#todoPanel     { grid-area: todo; align-self: start; min-width: 0; }
+#labsPanel     { grid-area: labs; align-self: start; min-width: 0; }
 #rndPanel      { grid-area: rnd; align-self: start; min-width: 0; }
 #consolePanel  { grid-area: console; align-self: start; }
+
+@media (min-width: 1100px) {
+  /* Inbound and neural queries occupy exactly the row established by the fully
+     expanded Temporal Protocol panel; Drive Pull follows all three. */
+  #todoPanel, #inboundPanel, #temporalPanel, #labsPanel, #rndPanel, #coursePanel {
+    height: 100%; box-sizing: border-box;
+  }
+  #todoPanel, #inboundPanel, #temporalPanel { min-height:0; max-height:var(--command-row-height); }
+  #rndPanel, #labsPanel, #coursePanel { min-height:0; max-height:var(--command-row-height); overflow-y:auto; overflow-x:hidden; }
+  #temporalPanel { overflow-y:auto; overflow-x:hidden; }
+  #todoPanel > h2, #inboundPanel > h2, #temporalPanel > h2,
+  #rndPanel > h2, #labsPanel > h2, #coursePanel > h2 {
+    position:sticky; top:-14px; z-index:3; margin-left:-1px; margin-right:-1px;
+    padding-top:14px; background:#07131d;
+  }
+  #inboundPanel { overflow:hidden; display:flex; flex-direction:column; }
+  #todoPanel { overflow: hidden; display:flex; flex-direction:column; }
+  /* The scroller is the <details> itself, not the list inside it: Chrome slots a
+     details' content into an anonymous box, so flex:1 on .todoList never reaches
+     the flex line and the list sizes to content — overrunning the composer. */
+  #todoPanel .todoDrop { flex:1 1 0; min-height:0; overflow-y:auto; }
+  #todoPanel .todoDrop:not([open]) { flex:0 0 auto; overflow:visible; }
+  #todoPanel .todoDrop > summary { position:sticky; top:0; z-index:2; background:var(--panel); }
+  #todoPanel .todoList { height:auto; overflow:visible; }
+  #inboundPanel #inboundList { flex:1 1 auto; min-height:0; max-height:none; }
+  #rndPanel #rndList { max-height:78px; }
+  #temporalPanel { height:100%; min-height:0; box-sizing:border-box; overflow-y:auto; overflow-x:hidden; contain:layout paint; }
+  #manifestPanel, #transcribePanel, #drivePanel, #systemPanel, #consolePanel {
+    height:100%; min-height:0; box-sizing:border-box;
+  }
+  #consolePanel { overflow:hidden; display:flex; flex-direction:column; }
+  #consolePanel .log { flex:1 1 auto; min-height:0; max-height:none; }
+}
+@media (min-width: 901px) and (max-width: 1099px) {
+  main.linked #temporalPanel { grid-column: 1 / -1; }
+  #todoPanel, #inboundPanel, #labsPanel, #rndPanel, #coursePanel {
+    height: 100%; box-sizing: border-box; overflow-y: auto; overflow-x: hidden;
+  }
+}
 
 /* ── Footer telemetry strip ─────────────────────────────────────────────── */
 footer {
@@ -200,19 +258,113 @@ footer {
 footer b { color: var(--cyan-dim); font-weight: 400; }
 footer .right { margin-left: auto; }
 
+.priorityTools { display:grid; grid-template-columns:minmax(220px,1fr) auto; gap:9px; margin-bottom:11px; }
+.priorityTools #driveSearch { min-width:0; }
+.driveIndex { padding:8px 10px; color:var(--muted); }
+.priorityList { display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:7px; }
+.priorityFile { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:10px;
+  align-items:center; padding:9px 11px; border:1px solid var(--line); background:rgba(8,20,30,.5); }
+.priorityFile .path { min-width:0; overflow-wrap:anywhere; color:var(--cyan-soft); font-size:11px; }
+.priorityFile .size { color:var(--muted); font-size:9px; white-space:nowrap; }
+.priorityPreview { padding:5px 8px; font-size:8px; }
+.priorityFetch { padding:6px 9px; font-size:8px; }
+.materialShade { position:fixed; inset:0; z-index:40; background:rgba(0,5,9,.64);
+  opacity:0; pointer-events:none; transition:opacity .18s; }
+.materialDrawer { position:fixed; z-index:41; top:0; right:0; width:var(--material-drawer-width); height:100vh;
+  transform:translateX(102%); transition:transform .2s ease; background:#061019;
+  border-left:1px solid var(--line-hot); box-shadow:-18px 0 55px rgba(0,0,0,.55);
+  display:flex; flex-direction:column; }
+body.materialOpen .materialShade { opacity:1; pointer-events:auto; }
+body.materialOpen .materialDrawer { transform:translateX(0); }
+body.materialOpen > header, body.materialOpen > main, body.materialOpen > #announcementPanel, body.materialOpen > footer {
+  visibility:hidden; pointer-events:none;
+}
+.materialChat { position:fixed; z-index:41; inset:0 var(--material-drawer-width) 0 0; display:flex; flex-direction:column;
+  visibility:hidden; opacity:0; pointer-events:none; background:#030712; transition:opacity .18s ease; }
+body.materialOpen .materialChat { visibility:visible; opacity:1; pointer-events:auto; }
+.materialChatHead { flex:none; padding:18px 20px 14px; border-bottom:1px solid var(--line); background:rgba(5,15,23,.96); }
+.materialChatKicker { color:var(--cyan); font-size:9px; letter-spacing:.18em; text-transform:uppercase; }
+.materialChatContext { margin-top:7px; color:var(--muted); font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.materialChatLog { flex:1; min-width:0; min-height:0; overflow-y:auto; overflow-x:hidden; padding:clamp(18px,4vw,48px); padding-bottom:72px;
+  scroll-padding-bottom:72px; color:var(--ink); font-size:12px; line-height:1.75; }
+.materialChatLog > :last-child { margin-bottom:16px; }
+.materialChatIntro { max-width:620px; padding:18px; border:1px solid var(--line); background:rgba(7,22,32,.7); color:var(--muted); }
+.materialChatForm { flex:none; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:14px 18px 18px; border-top:1px solid var(--line); background:#050d15; }
+.materialChatForm input { min-width:0; }
+.studyTabs { display:flex; gap:6px; margin-top:13px; }
+.studyTab[aria-selected="true"] { color:#eaffff; border-color:var(--cyan); background:rgba(14,116,144,.22); }
+.studyPane { display:none; flex:1; min-height:0; flex-direction:column; }
+.studyPane.active { display:flex; }
+.notesTools { flex:none; display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:8px; padding:14px 18px; border-bottom:1px solid var(--line); background:#050d15; }
+.notesEditor { flex:1; min-height:0; width:100%; resize:none; border:0; border-radius:0; padding:24px clamp(18px,4vw,48px); background:#030712; color:var(--ink); font:12px/1.75 var(--mono); outline:none; }
+.notesFoot { flex:none; display:flex; justify-content:space-between; gap:12px; padding:9px 18px; border-top:1px solid var(--line); background:#050d15; color:var(--muted); font-size:9px; }
+.notesSearchResults { position:absolute; z-index:3; top:100%; left:18px; right:18px; max-height:260px; overflow:auto; border:1px solid var(--line-hot); background:#061019; box-shadow:0 14px 35px rgba(0,0,0,.55); }
+.notesSearchResults:empty { display:none; }
+.noteSearchHit { display:block; width:100%; padding:10px 12px; border:0; border-bottom:1px solid var(--line); text-align:left; color:var(--cyan-soft); background:transparent; }
+.noteSearchHit small { display:block; margin-top:4px; color:var(--muted); }
+.materialChatError { padding:12px; border:1px solid rgba(255,91,118,.35); color:var(--red); white-space:pre-wrap; overflow-wrap:anywhere; }
+.materialChatNotice { margin-top:10px; padding:10px 12px; border:1px solid rgba(245,158,11,.28); background:rgba(79,48,4,.18); color:var(--amber); font-size:10px; line-height:1.5; }
+.materialMessage { width:100%; max-width:100%; min-width:0; margin-top:18px; padding:13px 15px; border:1px solid var(--line); background:rgba(7,20,30,.72); overflow-wrap:anywhere; }
+.materialMessage.user { margin-left:auto; max-width:82%; border-color:rgba(20,184,166,.42); background:rgba(8,54,57,.28); }
+.materialMessageLabel { margin-bottom:7px; color:var(--cyan); font-size:9px; letter-spacing:.15em; text-transform:uppercase; }
+.materialMessage h4, .materialMessage h5 { margin:16px 0 7px; color:#e5faff; line-height:1.35; }
+.materialMessage p { margin:7px 0; }
+.materialMessage blockquote { margin:10px 0; padding:7px 10px; border-left:2px solid var(--cyan-dim); color:var(--muted); background:rgba(2,10,16,.5); }
+.materialMessage table { width:100%; min-width:0; table-layout:fixed; margin:12px 0; border-collapse:collapse; font-size:10px; }
+.materialMessage th, .materialMessage td { padding:7px 8px; border:1px solid var(--line); text-align:left; vertical-align:top; white-space:normal; overflow-wrap:anywhere; }
+.materialMessage th { color:var(--cyan); background:rgba(9,34,45,.7); }
+.materialMessage pre { max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; }
+.materialMessage code { white-space:break-spaces; overflow-wrap:anywhere; }
+.materialMessage .katex-display { max-width:100%; overflow-x:auto; overflow-y:hidden; }
+.materialSnapshot { display:none; align-items:center; gap:8px; padding:8px 18px; border-top:1px solid var(--line); background:#050d15; color:var(--cyan-soft); font-size:9px; }
+.materialSnapshot.ready { display:flex; }
+.materialSnapshot img { width:54px; height:36px; object-fit:cover; border:1px solid var(--line-hot); }
+.lassoLayer { position:fixed; z-index:50; inset:0; display:none; cursor:crosshair; background:rgba(0,4,8,.28); }
+.lassoLayer.active { display:block; }
+.lassoHint { position:absolute; top:12px; left:50%; transform:translateX(-50%); padding:9px 12px; border:1px solid var(--line-hot); background:#04101a; color:var(--cyan); font-size:9px; letter-spacing:.12em; text-transform:uppercase; }
+.lassoSelection { position:absolute; display:none; border:1px solid #5eead4; background:rgba(20,184,166,.12); box-shadow:0 0 0 9999px rgba(0,4,8,.5), var(--glow); }
+.materialHead { flex:none; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px;
+  padding:17px 18px 13px; border-bottom:1px solid var(--line); }
+.materialTitle { color:#eaf9ff; overflow-wrap:anywhere; font-size:13px; }
+.materialMeta { color:var(--muted); font-size:9px; margin-top:6px; }
+.materialActions { display:flex; gap:7px; align-items:start; }
+.materialBody { flex:1 1 auto; min-height:0; padding:14px; display:flex; align-items:center;
+  justify-content:center; background:rgba(1,7,11,.8); }
+.materialBody iframe, .materialBody video, .materialBody img { width:100%; height:100%; border:0; object-fit:contain; }
+.materialBody audio { width:min(560px,100%); }
+.materialFallback { max-width:480px; color:var(--muted); line-height:1.7; text-align:center; }
+@media (max-width:900px) {
+  :root { --material-drawer-width:min(720px,94vw); }
+  body.materialOpen { padding-right:0; }
+  body.materialOpen > header, body.materialOpen > main, body.materialOpen > #announcementPanel, body.materialOpen > footer { visibility:visible; }
+  .materialChat { display:none; }
+}
+@media (max-width:600px) { .priorityList { grid-template-columns:1fr; } }
+
 /* ── Controls ───────────────────────────────────────────────────────────── */
-input[type=password], input[type=text] {
+input[type=password], input[type=text], input[type=search] {
   width: 100%; padding: 9px 11px; background: rgba(4,10,16,.8);
   border: 1px solid var(--line); color: var(--ink); font: 12px/1.4 var(--mono);
   border-radius: 0;
 }
 input:focus { outline: none; border-color: var(--cyan); box-shadow: var(--glow); }
+select {
+  padding: 9px 11px; background: rgba(4,10,16,.8);
+  border: 1px solid var(--line); color: var(--ink); font: 12px/1.4 var(--mono);
+  border-radius: 0; min-width: 0; max-width: 100%; cursor: pointer;
+}
+select:focus { outline: none; border-color: var(--cyan); box-shadow: var(--glow); }
+select:disabled { opacity: .45; cursor: not-allowed; }
+/* The popup is drawn by the OS, so it does not inherit the panel's palette -
+   set both explicitly or dark-theme users get black text on black. */
+select option, select optgroup { background: #071018; color: var(--ink); }
 button {
   font: 600 10px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase;
   padding: 10px 14px; cursor: pointer; color: var(--cyan);
   background: rgba(18,48,68,.5); border: 1px solid var(--line-hot);
   transition: background .15s, color .15s, box-shadow .15s;
 }
+button:focus-visible { outline:1px solid var(--cyan); outline-offset:2px; box-shadow:var(--glow); }
 button:hover:not(:disabled) { background: rgba(38,92,124,.7); box-shadow: var(--glow); }
 button.primary { background: rgba(56,211,255,.15); color: #eaf9ff; border-color: var(--cyan); }
 button.primary:hover:not(:disabled) { background: rgba(56,211,255,.28); }
@@ -233,12 +385,12 @@ input[type=checkbox]:disabled { opacity: .3; cursor: not-allowed; }
 /* ── Lists (course nodes, media) — the reference's query rows ───────────── */
 #courses, #mediaList {
   display: flex; flex-direction: column; gap: 7px;
-  max-height: 340px; overflow-y: auto;
+  max-height: 340px; overflow-y: auto; overflow-x: hidden;
 }
 label.course {
   display: flex; gap: 11px; align-items: flex-start; padding: 11px 13px; cursor: pointer;
   border: 1px solid var(--line); background: rgba(11,26,38,.55);
-  font-size: 12px; line-height: 1.45;
+  min-width:0; overflow-wrap:anywhere; font-size: 12px; line-height: 1.45;
 }
 label.course:hover { background: var(--panel-lit); border-color: var(--line-hot); }
 
@@ -251,11 +403,15 @@ label.course:hover { background: var(--panel-lit); border-color: var(--line-hot)
 .metric .val.on { color: var(--green); } .metric .val.off { color: var(--red); }
 .metric .val.warn { color: var(--amber); }
 
-/* ── Temporal protocol: week strip + upcoming list ──────────────────────── */
-.tpWeek { display: grid; gap: 5px; }  /* column count set from the day list */
+/* ── Temporal protocol: weekday month + upcoming list ────────────────── */
+.tpWeek { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
+.tpWeekHead {
+  color: var(--muted); font-size: 8px; letter-spacing: .16em;
+  text-align: center; text-transform: uppercase; padding: 0 0 2px;
+}
 .tpDay {
-  border: 1px solid var(--line); padding: 7px 3px 8px; text-align: center;
-  background: rgba(8,20,30,.5); min-height: 58px;
+  border: 1px solid var(--line); padding: 5px 3px 6px; text-align: center;
+  background: rgba(8,20,30,.5); min-height: 45px;
   cursor: pointer; font: inherit; color: inherit;
   transition: background .12s, border-color .12s;
 }
@@ -264,21 +420,23 @@ label.course:hover { background: var(--panel-lit); border-color: var(--line-hot)
 /* Today is marked with a dotted underline; the *selected* tab is the lit one, so the
    two stay distinguishable when you browse away from today. */
 .tpDay.today .n { border-bottom: 1px dotted var(--cyan-dim); }
-.tpDay[aria-selected="true"] {
+.tpDay[aria-pressed="true"] {
   border-color: var(--cyan); background: rgba(56,211,255,.15); box-shadow: var(--glow);
 }
 .tpDay .d {
   font-size: 9px; letter-spacing: .14em; color: var(--muted); text-transform: uppercase;
 }
-.tpDay[aria-selected="true"] .d { color: var(--cyan-soft); }
+.tpDay[aria-pressed="true"] .d { color: var(--cyan-soft); }
 .tpDay .n { font-size: 15px; color: var(--ink); margin-top: 2px; }
 .tpDay .pips { display: flex; gap: 2px; justify-content: center; margin-top: 5px;
                flex-wrap: wrap; }
 .tpDay .pips i { width: 4px; height: 4px; border-radius: 50%; background: var(--cyan-dim);
                  display: block; }
-.tpDay[aria-selected="true"] .pips i { background: var(--cyan); box-shadow: 0 0 5px var(--cyan); }
-/* The day's classes scroll inside the panel, so a heavy day cannot stretch the column. */
-#tpDaySchedule { max-height: 232px; overflow-y: auto; }
+.tpDay[aria-pressed="true"] .pips i { background: var(--cyan); box-shadow: 0 0 5px var(--cyan); }
+.tpItem.dynamic { border-left-color:var(--amber); background:rgba(255,190,82,.07); }
+.tpChange { color:var(--amber); font-size:9px; display:block; margin-top:4px; }
+/* Keep every class visible; the temporal panel and its grid row grow with the day. */
+#tpDaySchedule { max-height: none; overflow: visible; }
 .tpPhase {
   font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
   color: var(--amber); margin-bottom: 12px;
@@ -362,8 +520,8 @@ td.muted { color: var(--muted); }
   box-shadow: var(--glow);
 }
 
-/* ── Inbound (cerberus flags) ────────────────────────────────────────────── */
-#inboundList { max-height: 260px; overflow-y: auto; }
+/* ── Inbound (triage flags) ────────────────────────────────────────────── */
+#inboundList { max-height: 260px; overflow-y: auto; overflow-x: hidden; }
 .inb {
   display: flex; gap: 10px; align-items: flex-start; padding: 9px 11px;
   margin-bottom: 5px; border: 1px solid var(--line); background: rgba(11,26,38,.5);
@@ -373,8 +531,13 @@ td.muted { color: var(--muted); }
 .inb.Medium { border-left-color: var(--cyan-dim); }
 .inb .body { flex: 1; min-width: 0; }
 .inb .t { color: #e6f7ff; display: block; word-break: break-word; }
-.inb .who { display: block; color: var(--muted); font-size: 10px; margin-top: 3px; }
-.inb .act { display: block; color: var(--amber); font-size: 10px; margin-top: 4px; }
+.inb .who { display: block; color: var(--muted); font-size: 10px; margin-top: 3px; overflow-wrap:anywhere; }
+.inb .act { display: block; color: var(--amber); font-size: 10px; margin-top: 4px; overflow-wrap:anywhere; }
+.inb .due { display:inline-block; color:var(--cyan-soft); font-size:9px; margin-top:5px; }
+.inb .due.overdue { color:var(--red); }
+.inb .dupes { color:var(--violet); }
+.inbDone { flex:none; padding:6px 8px; font-size:8px; }
+.inboundSyncRow { display:flex; align-items:center; gap:9px; margin-bottom:10px; }
 .inb .pri {
   font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
   border: 1px solid currentColor; padding: 2px 6px; flex: none; color: var(--amber);
@@ -383,7 +546,29 @@ td.muted { color: var(--muted); }
 .inb a { color: var(--cyan-dim); }
 
 /* ── R&D board ──────────────────────────────────────────────────────────── */
-#rndList { max-height: 300px; overflow-y: auto; }
+/* Research direction: a standing steer, folded away until wanted so an empty
+   optional field never competes with the board itself. */
+#rndDirectionWrap summary {
+  padding: 7px 2px 9px; cursor: pointer; color: var(--cyan-dim); user-select: none;
+  font: 500 9px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase;
+  list-style: none;
+}
+#rndDirectionWrap summary::-webkit-details-marker { display: none; }
+#rndDirectionWrap summary::before {
+  content: "+"; display: inline-block; width: 18px; color: var(--cyan-dim);
+}
+#rndDirectionWrap[open] summary::before { content: "−"; }
+#rndDirectionWrap summary .muted { text-transform: none; letter-spacing: .04em; }
+#rndDirectionWrap.set summary { color: var(--cyan); }
+#rndDirection {
+  width: 100%; padding: 9px 11px; background: rgba(4,10,16,.8);
+  border: 1px solid var(--line); color: var(--ink); font: 12px/1.5 var(--mono);
+  border-radius: 0; resize: vertical; box-sizing: border-box;
+}
+#rndDirection:focus { outline: none; border-color: var(--cyan); box-shadow: var(--glow); }
+#rndDirectionFoot { display: block; font-size: 10px; margin-top: 5px; }
+
+#rndList { max-height: 300px; overflow-y: auto; overflow-x: hidden; }
 .rndItem {
   display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px;
   margin-bottom: 5px; border: 1px solid var(--line); background: rgba(11,26,38,.5);
@@ -395,7 +580,7 @@ td.muted { color: var(--muted); }
 .rndItem.parked { border-left-color: var(--muted); opacity: .5; }
 .rndItem .body { flex: 1; min-width: 0; }
 .rndItem .t { color: #e6f7ff; word-break: break-word; }
-.rndItem .meta { display: block; color: var(--muted); font-size: 10px; margin-top: 3px; }
+.rndItem .meta { display: block; color: var(--muted); font-size: 10px; margin-top: 3px; overflow-wrap:anywhere; }
 .rndItem .meta a { color: var(--cyan-dim); }
 .rndTag {
   font-size: 9px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
@@ -461,6 +646,179 @@ pre.log {
 }
 .statusStrip .dot { margin-right: 9px; }
 
+.todoComposer {
+  display:flex; width:100%; min-width:0; gap:0; margin-top:10px;
+  border:1px dashed rgba(56,211,255,.28); background:rgba(4,14,22,.28);
+}
+.todoComposer > * { min-width:0; }
+.todoComposer input { flex:1; border:0; background:transparent; color:var(--cyan-soft); }
+.todoComposer select { flex:0 0 120px; border-width:0 1px 0 0; background:rgba(4,14,22,.75); }
+.todoComposer input:focus { box-shadow:none; }
+.todoComposer #todoAdd { flex:none; border-width:0 0 0 1px; background:transparent; }
+.todoHead { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; }
+.todoHead .muted { font:9px var(--mono); letter-spacing:.12em; text-transform:uppercase; }
+.todoDrop { border:0; background:transparent; }
+.todoDrop summary {
+  padding:7px 2px 9px; cursor:pointer; color:var(--cyan-dim); user-select:none;
+  font:500 9px/1 var(--mono); letter-spacing:.16em; text-transform:uppercase;
+  list-style:none;
+}
+.todoDrop summary::-webkit-details-marker { display:none; }
+.todoDrop summary::before { content:"+"; display:inline-block; width:18px; color:var(--cyan-dim); }
+.todoDrop[open] summary::before { content:"−"; }
+.todoDrop[open] summary { border-bottom:0; }
+.todoList { display:grid; align-content:start; gap:8px; height:230px; overflow-y:auto; padding:0 2px 2px; }
+.todoCourseLabel { color:var(--violet); font:9px var(--mono); letter-spacing:.15em; text-transform:uppercase; padding:7px 2px 0; }
+.todoItem { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; align-items:center;
+  padding:11px 10px 11px 40px; border:1px solid var(--line); position:relative;
+  background:linear-gradient(90deg, rgba(56,211,255,.055), rgba(4,14,22,.7) 60%); }
+.todoItem::before { content:""; position:absolute; left:13px; top:50%; transform:translateY(-50%);
+  width:13px; height:13px; border:1px solid var(--cyan-dim); border-radius:50%;
+  box-shadow:inset 0 0 0 3px rgba(4,14,22,.85); }
+.todoItem:hover::before { border-color:var(--cyan); box-shadow:0 0 8px rgba(56,211,255,.28); }
+.todoTitle { color:var(--cyan-soft); font-size:12px; }
+.todoDetails { color:var(--muted); font-size:11px; margin-top:5px; white-space:pre-wrap; }
+.todoRemove { padding:5px 7px; border-color:transparent; color:var(--muted); background:transparent; }
+.todoRemove:hover:not(:disabled) { color:var(--red); border-color:rgba(255,122,112,.35); box-shadow:none; }
+.todoAiBar { display:flex; gap:7px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
+.todoAiBar select { min-width:135px; flex:1; }
+.todoActions { display:flex; gap:5px; align-items:center; }
+.todoRun { padding:5px 8px; color:var(--cyan); }
+.todoFinding { grid-column:1 / -1; min-width:0; border-left:2px solid var(--cyan-dim); background:rgba(2,12,19,.58); color:#cbe8f3; font-size:11px; }
+.todoFinding summary { display:flex; align-items:center; gap:8px; padding:8px 10px; cursor:pointer;
+  list-style:none; color:var(--cyan-dim); font:9px var(--mono); letter-spacing:.1em; text-transform:uppercase; }
+.todoFinding summary::-webkit-details-marker { display:none; }
+.todoFinding summary::before { content:"+"; color:var(--cyan); font-size:12px; }
+.todoFinding[open] summary::before { content:"−"; }
+.todoFinding[open] summary { border-bottom:1px solid var(--line); }
+.todoFindingText { padding:10px 12px 12px; }
+/* The finding arrives as markdown, so it is rendered to real elements rather than
+   dumped pre-wrapped. Deliberately not capped: the query stack is already a single
+   scroll region, and a nested scroller here would trap the wheel inside an answer. */
+.todoFindingText { overflow-wrap:anywhere; line-height:1.65; }
+.todoFindingText > :first-child { margin-top:0; }
+.todoFindingText > :last-child { margin-bottom:0; }
+.todoFindingText p { margin:.6em 0; }
+.todoFindingText h4, .todoFindingText h5 {
+  margin:1em 0 .45em; color:var(--cyan); font:600 10px/1.35 var(--mono);
+  letter-spacing:.13em; text-transform:uppercase;
+}
+.todoFindingText h5 { color:var(--cyan-dim); font-size:9px; }
+.todoFindingText strong { color:#eaf9ff; font-weight:600; }
+.todoFindingText em { color:var(--cyan-soft); font-style:italic; }
+.todoFindingText ul, .todoFindingText ol { margin:.55em 0; padding-left:1.35em; }
+.todoFindingText li { margin:.28em 0; }
+.todoFindingText code {
+  font:11px var(--mono); color:var(--amber);
+  background:rgba(56,211,255,.08); padding:1px 4px; border-radius:2px;
+}
+.todoFindingText pre {
+  margin:.65em 0; padding:9px 11px; background:rgba(2,10,16,.75);
+  border-left:2px solid var(--cyan-dim); overflow-x:auto;
+}
+.todoFindingText pre code { background:none; padding:0; color:#cbe8f3; }
+.todoFindingText hr { border:0; border-top:1px solid var(--line); margin:.9em 0; }
+.todoFindingText .katex { white-space:normal; font-size:1.08em; }
+.todoFindingText .katex-display { max-width:100%; margin:.75em 0; padding:4px 0; overflow-x:auto; overflow-y:hidden; }
+.todoErr { grid-column:1 / -1; color:var(--red); font-size:10px; }
+
+/* Lab Ops is a compact readiness console, not another expanding work queue. */
+.labTabs { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+.labTab[aria-selected="true"] { color:#eaf9ff; border-color:var(--cyan); background:rgba(56,211,255,.18); }
+/* Every track below is sized off the panel, not the viewport: Lab Ops sits in the
+   ~350px right column at desktop widths, so viewport-keyed breakpoints never fire
+   where the crowding actually happens. auto-fit collapses the columns instead. */
+.labHero { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:14px; align-items:center; padding:15px; background:rgba(4,16,24,.62); border:1px solid var(--line); }
+.labHero > * { min-width:0; }
+.labHero > button { justify-self:start; }
+.labCourse { color:#eaf9ff; font-size:17px; letter-spacing:.08em; }
+.labMeta { display:block; color:var(--cyan-dim); margin-top:5px; font-size:11px; }
+.labGauge { height:6px; background:rgba(56,211,255,.10); margin-top:8px; }
+.labGauge i { display:block; height:100%; background:var(--cyan); box-shadow:var(--glow); }
+.labStages { display:grid; grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); gap:7px; margin:12px 0; }
+.labStage { text-align:left; color:var(--muted); border-color:var(--line); }
+.labStage.done { color:var(--green); border-color:rgba(87,255,184,.45); background:rgba(87,255,184,.08); }
+.labPack { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; }
+.labCard { min-width:0; overflow-wrap:anywhere; border-left:2px solid var(--cyan-dim); background:rgba(8,25,36,.55); padding:11px; color:var(--ink); font-size:11px; }
+.labCard b { display:block; color:var(--cyan); margin-bottom:6px; text-transform:uppercase; letter-spacing:.12em; font-size:9px; }
+.labSources { color:var(--muted); word-break:break-word; }
+.announcementRibbon {
+  flex:none; width:100%; height:44px; max-height:44px; display:flex; align-items:stretch;
+  min-width:0; overflow:hidden; border-top:1px solid rgba(56,211,255,.12);
+  border-bottom:1px solid var(--line-hot);
+  background:linear-gradient(90deg, rgba(8,27,40,.96), rgba(3,12,19,.9) 34%, rgba(4,12,19,.97));
+  box-shadow:0 5px 18px rgba(0,0,0,.24); font-family:var(--mono);
+}
+.announcementRibbon .todoHead, .announcementRibbon .annAdmin { display:none; }
+.announcementRibbon .annWarning { display:none; }
+.annMode { flex:none; display:flex; align-items:stretch; border-left:1px solid var(--line); background:rgba(4,12,19,.96); }
+.annMode button { min-width:0; padding:0 10px; border:0; border-left:1px solid var(--line); background:transparent; font-size:8px; }
+.annMode button[aria-pressed="true"] { color:#eaf9ff; border-color:var(--cyan); background:rgba(56,211,255,.16); }
+.annTicker { display:flex; flex:1; min-width:0; height:100%; overflow:hidden; }
+.annBadge { flex:none; position:relative; z-index:2; display:flex; align-items:center; gap:8px; min-width:214px;
+  padding:0 16px; color:var(--cyan-soft); border-right:1px solid var(--line-hot); background:rgba(8,27,40,.96);
+  font-weight:700; font-size:9px; letter-spacing:.14em; text-transform:uppercase; white-space:nowrap; }
+.annBadge::before { content:""; width:6px; height:6px; flex:none; border-radius:50%; background:var(--green); box-shadow:0 0 8px var(--green); }
+.annViewport { flex:1; min-width:0; overflow:hidden; position:relative; }
+.annTrack { display:flex; width:max-content; min-height:100%; align-items:center;
+  animation:annMarquee var(--ann-marquee-duration, 55s) linear infinite; }
+.announcementRibbon:hover .annTrack { animation-play-state:paused; }
+.annMessage { flex:none; display:flex; align-items:center; gap:10px; padding:0 28px; color:#eaf9ff; white-space:nowrap; }
+.annMessage::after { content:"◆"; color:var(--cyan-dim); font-size:7px; margin-left:16px; }
+.annMessage .priority { width:6px; height:6px; border-radius:50%; background:#3b82f6; box-shadow:0 0 8px currentColor; }
+.annMessage.warning .priority { background:#f59e0b; } .annMessage.urgent .priority { background:#ef4444; }
+@keyframes annMarquee { from { transform:translateX(0); } to { transform:translateX(-50%); } }
+.announcementRibbon.step .annTrack { width:100%; animation:none; }
+.announcementRibbon.step .annMessage { position:absolute; inset:0; padding:0 22px; white-space:normal; opacity:0; transform:translateX(18px); transition:opacity .45s, transform .45s; }
+.announcementRibbon.step .annMessage.active { opacity:1; transform:translateX(0); }
+.announcementRibbon.step .annMessage::after { display:none; }
+.annTickerEmpty { color:var(--muted); padding:14px 22px; }
+@media (max-width:700px) {
+  .annBadge { min-width:168px; padding:0 10px; font-size:8px; }
+  .annMode button { padding:0 7px; font-size:7px; }
+}
+.annToolbar { display:flex; align-items:center; gap:6px; overflow-x:auto; padding-bottom:5px; margin-bottom:7px; }
+.annToolbar button { flex:none; }
+.annActions { display:flex; gap:6px; margin-left:auto; padding-left:10px; }
+.annDrop { border:0; background:transparent; }
+.annDrop summary { cursor:pointer; list-style:none; border:1px solid var(--line); padding:10px 12px;
+  color:var(--cyan-soft); font-size:10px; letter-spacing:.1em; text-transform:uppercase; }
+.annDrop summary::-webkit-details-marker { display:none; }
+.annDrop summary::before { content:"+"; display:inline-block; width:18px; color:var(--cyan-dim); }
+.annDrop[open] summary::before { content:"−"; }
+.annDrop[open] summary { border-bottom-color:transparent; }
+.annFilter[aria-pressed="true"] { color:#eaf9ff; border-color:var(--cyan); background:rgba(56,211,255,.17); }
+.annList { max-height:390px; overflow:auto; display:grid; gap:6px; }
+.annItem { display:grid; grid-template-columns:10px minmax(0,1fr) auto; gap:11px; padding:12px;
+  border:1px solid var(--line); background:rgba(5,18,27,.58); }
+.annItem.read { opacity:.58; }
+.annPulse { width:7px; height:7px; margin-top:5px; border-radius:50%; background:var(--cyan); box-shadow:var(--glow); }
+.annItem.read .annPulse { background:var(--muted); box-shadow:none; }
+.annTitle { color:#eaf9ff; font-size:12px; }
+.annMeta { color:var(--cyan-dim); font-size:9px; letter-spacing:.09em; margin-top:4px; }
+.annContent { border:0; background:transparent; min-width:0; }
+.annContent summary { cursor:pointer; list-style:none; position:relative; padding-right:20px; }
+.annContent summary::-webkit-details-marker { display:none; }
+.annContent summary::after { content:"+"; position:absolute; right:1px; top:1px; color:var(--cyan-dim); }
+.annContent[open] summary::after { content:"−"; }
+.annBody { color:var(--ink); font-size:11px; line-height:1.55; margin-top:8px; white-space:pre-line; }
+.annLinks { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.annLinks a { color:var(--cyan); border:1px solid var(--line); padding:4px 6px; font-size:9px; }
+.annTldr { margin:0 0 8px; border:1px solid rgba(167,139,250,.25); background:rgba(167,139,250,.045); }
+.annTldr summary { cursor:pointer; list-style:none; padding:9px 11px; color:var(--violet); font-size:9px; letter-spacing:.14em; text-transform:uppercase; }
+.annTldr summary::-webkit-details-marker { display:none; }
+.annTldr summary::before { content:"+"; display:inline-block; width:18px; }
+.annTldr[open] summary::before { content:"−"; }
+.annTldrText { border-top:1px solid rgba(167,139,250,.18); padding:11px 13px; color:var(--ink); font-size:11px; line-height:1.55; white-space:pre-wrap; }
+.annRead { align-self:start; padding:6px 8px; color:var(--muted); background:transparent; }
+@media (max-width:700px) {
+  .todoComposer { flex-wrap:wrap; }
+  .todoComposer input { flex-basis:100%; }
+  .todoComposer select { flex:1; }
+  .todoComposer #todoAdd { width:100%; }
+}
+
 .dot { display:inline-block; width:6px; height:6px; border-radius:50%;
        background: currentColor; box-shadow: 0 0 8px currentColor; }
 .scanning { color: var(--amber); }
@@ -504,10 +862,12 @@ code { color: var(--cyan); }
   </div>
 
   <div class="chips">
+    <div class="headerSync"><button class="primary" id="syncAll" type="button" title="Sync announcements, inbound mail, and course nodes">Sync</button><span id="syncAllState" hidden></span></div>
     <div class="chip"><span class="k">Link</span><span class="v" id="linkState">—</span></div>
     <div class="chip"><span class="k">Scope</span><span class="v" id="scopeState">—</span></div>
     <div class="chip"><span class="k">Nodes</span><span class="v" id="courseCount">0</span></div>
     <div class="chip"><span class="k">Queued</span><span class="v" id="queueCount">0</span></div>
+    <div class="chip"><span class="k">Queries</span><span class="v" id="todoBadge">0</span></div>
     <div class="chip"><span class="k">Drive</span><span class="v" id="driveState">—</span></div>
     <div class="chip"><span class="k">Archived</span><span class="v" id="archivedCount">0</span></div>
   </div>
@@ -524,15 +884,25 @@ code { color: var(--cyan); }
   </div>
   <p class="hint">
     Sign in at ntulearn.ntu.edu.sg &rarr; <code>F12</code> &rarr; Application &rarr; Cookies &rarr;
-    copy <code>BbRouter</code>. Held locally; transmitted only to NTULearn.
+    copy <code>BbRouter</code>. Held locally; transmitted only to iNTUition.
   </p>
   <p class="err" id="authErr"></p>
+</section>
+
+<section class="panel" id="priorityPanel">
+  <h2 aria-label="Restore from Drive"><span id="driveVerb" aria-hidden="true">Pondering</span></h2>
+  <div class="priorityTools">
+    <input id="driveSearch" type="search" placeholder="Search Google Drive content…" aria-label="Search Google Drive content">
+    <button class="driveIndex" id="driveRefresh" title="Refresh the background Drive index">↻ Index</button>
+  </div>
+  <span class="muted" id="priorityState"></span>
+  <div class="bar" id="pullBarWrap" style="display:none"><i id="pullBar"></i></div>
+  <div class="priorityList" id="priorityList"></div>
 </section>
 
 <section class="panel" id="coursePanel">
   <h2>Course nodes</h2>
   <div class="row" style="margin-bottom:12px">
-    <button id="loadCourses">Sync list</button>
     <button id="selectAll">All</button>
     <button class="primary" id="scan">Scan</button>
     <span class="muted" id="scanState"></span>
@@ -573,10 +943,11 @@ code { color: var(--cyan); }
     <span class="muted" style="font-size:10px;letter-spacing:.16em">
       SYSTEM TIME <b style="color:var(--cyan-soft)" id="tpClock">--:--:--</b></span>
   </div>
-  <div class="tpPhase" id="tpPhase">—</div>
-  <div id="tpWeek" role="tablist" aria-label="Day of week"></div>
+  <div class="tpPhase"><span id="tpPhase">—</span>
+    <select id="tpTeachingWeek" aria-label="Teaching week"></select></div>
+  <div id="tpWeek" role="group" aria-label="Selected teaching week weekdays"></div>
   <div class="tpSubhead" id="tpSubhead">Schedule</div>
-  <div id="tpDaySchedule" role="tabpanel"></div>
+  <div id="tpDaySchedule" aria-live="polite"></div>
   <div class="tpUpload">
     <div class="tpStamp" id="tpStamp" hidden></div>
     <label class="tpDrop" id="tpDrop" hidden>
@@ -609,27 +980,89 @@ code { color: var(--cyan); }
   <div class="bar" id="pushBarWrap" style="display:none"><i id="pushBar"></i></div>
 </section>
 
-<section class="panel" id="inboundPanel" style="display:none">
-  <h2>Inbound</h2>
+<section class="panel" id="inboundPanel">
+  <h2 id="inboundHeading">Inbound</h2>
+  <span id="inboundSync" hidden></span><span id="inboundSyncState" hidden></span>
   <div id="inboundList"></div>
   <span class="muted" id="inboundFoot" style="font-size:10px;display:block;margin-top:9px"></span>
+</section>
+
+<section class="panel" id="todoPanel">
+  <div class="todoHead">
+    <h2 id="todoHeading" style="margin-bottom:0">Active neural queries</h2>
+    <span class="muted"><span class="dot"></span> query matrix</span>
+  </div>
+  <div class="todoAiBar">
+    <select id="todoBackend" title="AI backend">
+      <option value="auto">Auto provider</option><option value="omniroute">OmniRoute</option>
+      <option value="cli">Claude CLI</option>
+    </select>
+    <select id="todoModel" title="Model">
+      <option value="auto">Auto model</option>
+    </select>
+    <span class="muted" id="todoAiState"></span>
+  </div>
+  <details class="todoDrop" open>
+    <summary id="todoDropLabel">Active query stack</summary>
+    <div class="todoList" id="todoList"></div>
+  </details>
+  <div class="todoComposer">
+    <select id="todoCourse" title="Course code" aria-label="Course code"></select>
+    <input type="text" id="todoTitle" maxlength="200" placeholder="Add intelligence query" autocomplete="off">
+    <button id="todoAdd">+ Add query</button>
+  </div>
+</section>
+
+<section class="panel" id="labsPanel">
+  <div class="todoHead">
+    <h2 style="margin-bottom:0">Lab Ops</h2>
+    <span class="muted"><span class="dot"></span> pre-lab readiness</span>
+  </div>
+  <div class="labTabs" id="labTabs" role="tablist" aria-label="Lab course"></div>
+  <div id="labBody" role="tabpanel"></div>
+</section>
+
+<section class="announcementRibbon" id="announcementPanel">
+  <div class="todoHead">
+    <h2 id="announcementHeading" style="margin-bottom:0">Announcements</h2>
+    <span class="muted"><span class="dot"></span> live alert stream</span>
+  </div>
+  <form class="annAdmin" id="annAdmin" aria-label="Announcement configuration">
+    <input id="annAdminText" type="text" maxlength="240" placeholder="Add a student announcement" aria-label="Announcement text" required>
+    <select id="annPriority" aria-label="Alert priority">
+      <option value="info">Info · Blue</option>
+      <option value="warning">Warning · Orange</option>
+      <option value="urgent">Urgent · Red</option>
+    </select>
+    <button class="primary" type="submit">Add alert</button>
+    <div class="annMode" role="group" aria-label="Ticker transition mode">
+      <span class="annModeLabel">Motion</span>
+      <button type="button" data-ann-mode="continuous" aria-pressed="true">Continuous</button>
+      <button type="button" data-ann-mode="step" aria-pressed="false">Step + fade</button>
+    </div>
+    <span id="annAdminStatus" hidden></span>
+  </form>
+  <div class="annTicker" id="annTicker" aria-live="polite">
+    <div class="annBadge" id="annBadge"><span class="annWarning" aria-hidden="true">⚠</span><span id="annBadgeText">Maintenance</span></div>
+    <div class="annViewport"><div class="annTrack" id="annTrack"></div></div>
+  </div>
+  <span id="annFoot" hidden></span>
 </section>
 
 <section class="panel" id="rndPanel">
   <h2>R&amp;D</h2>
   <div class="row" style="margin-bottom:11px">
-    <input type="text" id="rndTitle" placeholder="Tool or experiment to investigate"
-           style="flex:2;min-width:190px">
-    <input type="text" id="rndCourse" placeholder="Course (optional)"
-           list="rndCourses" style="flex:0 0 150px">
-    <datalist id="rndCourses"></datalist>
-    <button class="primary" id="rndAdd">Log</button>
+    <select id="rndAutoCourse" style="flex:0 1 260px"></select>
+    <button class="primary" id="rndAuto" disabled>Run autonomous research</button>
+    <span class="muted" style="font-size:10px">Choose the course; OmniRoute selects the model and researches the question.</span>
   </div>
+  <details id="rndDirectionWrap" style="margin-bottom:11px">
+    <summary id="rndDirectionSummary">Research direction <span class="muted">(optional)</span></summary>
+    <textarea id="rndDirection" rows="3" placeholder="e.g. favour things I can finish in a weekend, prefer Python over JS, lean toward the maths modules rather than the coding ones"></textarea>
+    <span class="muted" id="rndDirectionFoot"></span>
+  </details>
   <div class="row" id="rndFilters" style="margin-bottom:11px"></div>
   <div id="rndList"></div>
-  <label class="rndMat" title="Share this course's transcripts and documents with the research session. Files are staged for the run and deleted afterwards.">
-    <input type="checkbox" id="rndMaterials"> share course materials
-  </label>
   <span class="muted" id="rndBackend" style="font-size:10px;display:block;margin-top:6px"></span>
 </section>
 
@@ -639,6 +1072,39 @@ code { color: var(--cyan); }
 </section>
 
 </main>
+
+<div class="materialShade" id="materialShade"></div>
+<section class="materialChat" id="materialChat" aria-hidden="true" aria-label="FRIDAY material assistant">
+  <header class="materialChatHead">
+    <div class="materialChatKicker">Study workspace</div>
+    <div class="materialChatContext" id="materialChatContext"></div>
+    <div class="studyTabs" role="tablist"><button type="button" class="studyTab" id="notesTab" role="tab" aria-selected="true">Notes</button><button type="button" class="studyTab" id="fridayTab" role="tab" aria-selected="false">Ask FRIDAY</button></div>
+  </header>
+  <section class="studyPane active" id="notesPane" role="tabpanel">
+    <div class="notesTools" style="position:relative"><input type="search" id="notesSearch" placeholder="Search all notes…"><button type="button" id="notePage">Insert page</button><button type="button" id="notePreview">Preview</button><div class="notesSearchResults" id="notesSearchResults"></div></div>
+    <textarea class="notesEditor" id="notesEditor" maxlength="250000" placeholder="# Notes\n\nStart writing about this material…"></textarea>
+    <div class="materialChatLog" id="notesPreview" hidden></div>
+    <div class="notesFoot"><span id="notesState">Notes are stored locally</span><span id="notesCount">0 words</span></div>
+  </section>
+  <section class="studyPane" id="fridayPane" role="tabpanel">
+    <div class="materialChatLog" id="materialChatLog">
+      <div class="materialChatIntro">Ask for an explanation, summary, worked example, or revision questions. Responses are grounded in the material displayed beside this workspace.</div>
+    </div>
+    <div class="materialSnapshot" id="materialSnapshot"><img id="materialSnapshotImage" alt="Selected material snapshot"><span>Snapshot attached to next question</span><button type="button" id="materialSnapshotRemove">Remove</button></div>
+    <form class="materialChatForm" id="materialChatForm">
+      <input type="text" id="materialChatQuestion" maxlength="2000" placeholder="Ask about this material…" required>
+      <button class="primary" id="materialChatAsk" type="submit">Ask</button>
+    </form>
+  </section>
+</section>
+<aside class="materialDrawer" id="materialDrawer" aria-hidden="true" aria-label="Drive material">
+  <div class="materialHead">
+    <div><div class="materialTitle" id="materialTitle"></div><div class="materialMeta" id="materialMeta"></div></div>
+    <div class="materialActions"><button id="materialLasso" aria-label="Capture part of material">Lasso</button><button id="materialClose" aria-label="Close material">Close</button></div>
+  </div>
+  <div class="materialBody" id="materialBody"></div>
+</aside>
+<div class="lassoLayer" id="lassoLayer" aria-hidden="true"><div class="lassoHint">Drag over the material · Esc to cancel</div><div class="lassoSelection" id="lassoSelection"></div></div>
 
 <footer>
   <span>Staging <b id="rootLabel">—</b></span>
@@ -650,19 +1116,77 @@ code { color: var(--cyan); }
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+// Keep visual, keyboard and assistive-technology reading order identical. The
+// source blocks remain independently maintainable; this is the canonical workflow.
+const WORKFLOW_ORDER = [
+  'authSection', 'priorityPanel', 'temporalPanel', 'todoPanel',
+  'inboundPanel', 'labsPanel', 'rndPanel', 'coursePanel', 'manifestPanel',
+  'systemPanel', 'transcribePanel', 'drivePanel', 'consolePanel'
+];
+const dashboardMain = document.querySelector('main');
+WORKFLOW_ORDER.forEach(id => dashboardMain.appendChild($(id)));
+document.querySelector('header').after($('announcementPanel'));
 let STATE = null;
 const picked = new Set();
 const trPicked = new Set();
+let sigPriority = null;
+
+// At desktop width the unbounded content in Inbound and Active Neural Queries must
+// not participate in sizing their shared grid track. Temporal Protocol is deliberately
+// fully expanded, so its intrinsic height is the authoritative row height.
+let commandRowFrame = 0;
+function syncCommandRowHeight() {
+  cancelAnimationFrame(commandRowFrame);
+  commandRowFrame = requestAnimationFrame(() => {
+    if (matchMedia('(min-width: 1100px)').matches) {
+      const temporal = $('temporalPanel');
+      dashboardMain.style.setProperty('--command-row-height',
+        Math.min(400, Math.max(340, temporal.scrollHeight)).toFixed(2) + 'px');
+    } else {
+      dashboardMain.style.removeProperty('--command-row-height');
+    }
+  });
+}
+new MutationObserver(syncCommandRowHeight).observe($('temporalPanel'), {
+  childList:true, subtree:true, characterData:true, attributes:true
+});
+window.addEventListener('resize', syncCommandRowHeight);
+
+const reportedFailures = new Map();
+function reportInterfaceFailure(source, error) {
+  const detail = error && (error.stack || error.message) || String(error || 'unknown failure');
+  const message = `${source}: ${detail}`.replace(/\s+/g, ' ').slice(0, 1000);
+  const now = Date.now();
+  if (now - (reportedFailures.get(message) || 0) < 30000) return;
+  reportedFailures.set(message, now);
+  fetch('/api/client-log', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({message}), keepalive:true
+  }).catch(() => {});
+}
+window.addEventListener('error', ev =>
+  reportInterfaceFailure('runtime', ev.error || `${ev.message} at ${ev.filename}:${ev.lineno}:${ev.colno}`));
+window.addEventListener('unhandledrejection', ev =>
+  reportInterfaceFailure('unhandled promise', ev.reason));
 
 async function api(path, body) {
-  const r = await fetch(path, {
-    method: body ? 'POST' : 'GET',
-    headers: {'Content-Type': 'application/json'},
-    body: body ? JSON.stringify(body) : undefined
-  });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-  return data;
+  const method = body ? 'POST' : 'GET';
+  try {
+    const r = await fetch(path, {
+      method, headers: {'Content-Type': 'application/json'},
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const text = await r.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; }
+    catch (_) { throw new Error(`HTTP ${r.status} returned a non-JSON response`); }
+    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    return data;
+  } catch (error) {
+    reportInterfaceFailure(`${method} ${path}`, error);
+    throw error;
+  }
 }
 
 function esc(t) {
@@ -741,6 +1265,11 @@ function render(s) {
   $('scopeState').className = 'v warn';
   $('courseCount').textContent = s.courses.length;
   $('queueCount').textContent = picked.size;
+  const unified = s.unified_sync || {};
+  $('syncAll').disabled = !!unified.syncing || !s.has_token;
+  $('syncAll').textContent = unified.syncing ? 'Syncing…' : 'Sync';
+  $('syncAllState').textContent = unified.syncing ? 'Announcements · inbound · nodes' : (unified.error || '');
+  $('syncAllState').className = 'headerSyncState ' + (unified.error ? 'err' : unified.syncing ? 'scanning' : 'muted');
 
   // ── footer telemetry ─────────────────────────────────────────────────────
   $('rootLabel').textContent = tail(s.download_root, 30);
@@ -755,6 +1284,7 @@ function render(s) {
   $('strip').textContent = busy ? busy + '…' : 'standing by';
 
   $('authSection').style.display = s.has_token ? 'none' : '';
+  dashboardMain.classList.toggle('linked', !!s.has_token);
   $('scanState').textContent = s.scanning ? 'scanning' : '';
   $('scanState').className = s.scanning ? 'scanning' : 'muted';
   $('scan').disabled = s.scanning || !s.courses.length;
@@ -766,7 +1296,7 @@ function render(s) {
     $('courses').innerHTML = s.courses.map(c =>
       `<label class="course"><input type="checkbox" class="cbox" value="${esc(c.id)}" checked>
        <span>${esc(c.name)}</span></label>`).join('')
-      || '<span class="muted" style="font-size:12px">No nodes. Run “Sync list”.</span>';
+      || '<span class="muted" style="font-size:12px">No nodes. Use Sync in the header.</span>';
   }
 
 
@@ -775,6 +1305,10 @@ function render(s) {
 
   const p = s.progress;
   $('barWrap').style.display = s.downloading ? '' : 'none';
+  if (!s.scanning && (s.scan_errors || []).length) {
+    $('scanState').textContent = s.scan_errors.length + ' course scan failed — see console';
+    $('scanState').className = 'err';
+  }
   if (p.total) {
     $('bar').style.width = Math.round(100 * p.done / p.total) + '%';
     $('dlState').textContent = s.downloading ? `${p.done}/${p.total} · ${tail(p.current, 40)}` : '';
@@ -788,6 +1322,10 @@ function render(s) {
   renderTemporal(s);
   renderTranscribe(s);
   renderDrive(s);
+  renderPriority(s);
+  renderTodo(s);
+  renderLabs(s);
+  renderAnnouncements(s);
 
   const logText = (s.log || []).map(l => '› ' + l).join('\n') || 'awaiting link…';
   if ($('log').textContent !== logText) {
@@ -796,12 +1334,468 @@ function render(s) {
   }
 }
 
+let announcementFilter = 'unread';
+let sigAnnouncements = null;
+function announcementCourseKey(course) {
+  return announcementCourseCodes(course)[0] || String(course || 'Other');
+}
+function announcementCourseCodes(course) {
+  return [...new Set(String(course || '').toUpperCase()
+    .match(/\b(?!AY\d)[A-Z]{2,4}\d{4}\b/g) || [])];
+}
+function registeredCourseCodes(s) {
+  const rows = Object.values((s.schedule || {}).all_week || {}).flat();
+  return new Set(rows.map(row => String(row.course || '').toUpperCase()).filter(Boolean));
+}
+function renderAnnouncements(s) {
+  const feed = s.announcements || {items:[], unread:0, total:0, courses:[]};
+  const registered = registeredCourseCodes(s);
+  const sig = JSON.stringify([feed, announcementFilter, [...registered].sort()]);
+  if (sig === sigAnnouncements) return;
+  sigAnnouncements = sig;
+  const itemCourseCodes = item => {
+    const codes = announcementCourseCodes(item.course);
+    const enrolled = codes.filter(code => registered.has(code));
+    // Shared iNTUition shells can name several programmes. When registration data
+    // is unavailable, the first shell code is safer than claiming all of them.
+    return enrolled.length ? enrolled : codes.slice(0, 1);
+  };
+  const courseCounts = {};
+  (feed.items || []).forEach(item => itemCourseCodes(item).forEach(code => {
+    courseCounts[code] = (courseCounts[code] || 0) + 1;
+  }));
+  const courseKeys = Object.keys(courseCounts).sort();
+  const filters = [['unread', `Unread ${feed.unread || 0}`], ['all', `All ${feed.total || 0}`]]
+    .concat(courseKeys.map(code => [code, `${code} ${courseCounts[code]}`]));
+  $('announcementHeading').textContent = `Announcements · ${feed.unread || 0} unread`;
+  $('annFilters').innerHTML = filters.map(([key,label]) =>
+    `<button class="annFilter" data-ann-filter="${esc(key)}" aria-pressed="${key === announcementFilter}">${esc(label)}</button>`).join('')
+    + `<span class="annActions"><button data-ann-summarize="1" ${feed.summarizing || !(feed.ai || {}).ready ? 'disabled' : ''}>${feed.summarizing ? 'Summarizing…' : 'AI TL;DR'}</button></span>`;
+  let items = feed.items || [];
+  if (announcementFilter === 'unread') items = items.filter(x => !x.read);
+  else if (announcementFilter !== 'all') {
+    items = items.filter(x => itemCourseCodes(x).includes(announcementFilter));
+  }
+  $('annDropLabel').textContent = items.length
+    ? `${items.length} announcement${items.length === 1 ? '' : 's'} in view`
+    : 'Announcement feed clear';
+  $('annList').innerHTML = items.length ? items.map(item => `
+    <article class="annItem ${item.read ? 'read' : ''}">
+      <i class="annPulse"></i><details class="annContent">
+        <summary><div class="annTitle">${esc(item.title)}</div>
+        <div class="annMeta" title="${esc(item.course)}">${esc(announcementCourseKey(item.course))} · ${esc((item.modified || item.created || '').replace('T',' ').slice(0,16))}</div></summary>
+        <div class="annBody">${esc(item.body)}</div>
+        ${(item.links || []).length ? `<div class="annLinks">${item.links.map(link =>
+          `<a href="${esc(link.url)}" target="_blank" rel="noreferrer">${esc(clip(link.title, 54))}</a>`).join('')}</div>` : ''}
+      </details><button class="annRead" data-ann-id="${esc(item.id)}" data-ann-read="${item.read ? '0' : '1'}">${item.read ? 'Unread' : 'Read'}</button>
+    </article>`).join('') : '<span class="muted" style="padding:12px">No announcements in this view.</span>';
+  const summary = feed.summary;
+  $('annTldr').innerHTML = summary
+    ? `<details class="annTldr"><summary>AI TL;DR · ${esc(summary.model || summary.backend || '')}</summary><div class="annTldrText">${esc(summary.text)}</div></details>`
+    : feed.summary_error ? `<span class="err">${esc(feed.summary_error)}</span>` : '';
+  const errs = feed.errors || [];
+  $('annFoot').textContent = feed.syncing ? 'Checking announcements and schedule changes…'
+    : feed.schedule_error ? 'Schedule detection failed — ' + feed.schedule_error
+    : errs.length ? errs.length + ' course(s) failed — see console'
+    : 'Last sync ' + ((feed.synced_at || 'never').replace('T',' ').slice(0,19));
+  $('annFoot').className = (errs.length || feed.schedule_error) ? 'err' : 'muted';
+}
+
+document.addEventListener('click', async (ev) => {
+  if (ev.target.dataset.annFilter) {
+    announcementFilter = ev.target.dataset.annFilter; sigAnnouncements = null;
+    renderAnnouncements(STATE); return;
+  }
+  try {
+    if (ev.target.dataset.annSync) await api('/api/announcements', {action:'sync'});
+    else if (ev.target.dataset.annSummarize) await api('/api/announcements', {action:'summarize'});
+    else if (ev.target.dataset.annId) await api('/api/announcements', {
+      action:'read', id:ev.target.dataset.annId, read:ev.target.dataset.annRead === '1'});
+    else return;
+    sigAnnouncements = null; await refresh();
+  } catch (e) { alert(e.message); }
+});
+
+let annStepTimer = null;
+let annStepIndex = 0;
+let annMode = 'continuous';
+let localAnnouncements = JSON.parse(localStorage.getItem('intuition-announcements') || '[]');
+
+function tickerPriority(item) {
+  const text = `${item.title || ''} ${item.body || ''}`.toLowerCase();
+  if (/urgent|emergency|cancelled|deadline|outage/.test(text)) return 'urgent';
+  if (/maintenance|warning|issue|delay|unavailable/.test(text)) return 'warning';
+  return item.priority || 'info';
+}
+
+function tldrTickerItems(summary) {
+  if (!summary || !summary.text) return [];
+  let priority = 'info';
+  const headings = {ACTION:'urgent', 'ACTION NOW':'urgent', PREPARE:'warning', FYI:'info'};
+  return String(summary.text).split(/\r?\n/).flatMap(line => {
+    const text = line.trim();
+    if (!text) return [];
+    const heading = text.replace(/[:#*]/g, '').trim().toUpperCase();
+    if (headings[heading]) { priority = headings[heading]; return []; }
+    const useful = text.replace(/^[-*\u2022]\s*/, '').trim();
+    return useful ? [{text:useful, priority, tldr:true}] : [];
+  });
+}
+
+function startAnnouncementSteps() {
+  clearTimeout(annStepTimer);
+  const messages = [...document.querySelectorAll('#annTrack .annMessage')];
+  annStepIndex %= Math.max(messages.length, 1);
+  messages.forEach((message, index) => message.classList.toggle('active', index === annStepIndex));
+  if (annMode !== 'step' || messages.length < 2) return;
+  const scheduleNext = () => {
+    // Roughly 450 words/minute, bounded for rapid scanning without flashing.
+    // TL;DR bullets do not monopolise the ribbon. Hovering extends the current item.
+    const words = (messages[annStepIndex].textContent.trim().match(/\S+/g) || []).length;
+    const readingMs = Math.max(3000, Math.min(6000, Math.round(words / 7.5 * 1000)));
+    annStepTimer = setTimeout(() => {
+      if (!$('annTicker').matches(':hover')) {
+        annStepIndex = (annStepIndex + 1) % messages.length;
+        messages.forEach((message, index) => message.classList.toggle('active', index === annStepIndex));
+      }
+      scheduleNext();
+    }, readingMs);
+  };
+  scheduleNext();
+}
+
+function setAnnouncementMode(mode) {
+  annMode = mode === 'step' ? 'step' : 'continuous';
+  localStorage.setItem('intuition-ann-mode', annMode);
+  document.querySelectorAll('[data-ann-mode]').forEach(button =>
+    button.setAttribute('aria-pressed', String(button.dataset.annMode === annMode)));
+  $('announcementPanel').classList.toggle('step', annMode === 'step');
+  startAnnouncementSteps();
+}
+
+// The ticker intentionally replaces the legacy announcement cards while continuing
+// to consume the same LMS feed. Administrator-created alerts remain browser-local.
+function renderAnnouncements(s) {
+  const feed = s.announcements || {items:[], unread:0, total:0, courses:[]};
+  const tldr = tldrTickerItems(feed.summary);
+  let items = localAnnouncements.concat(tldr.length ? tldr : (feed.items || []).map(item => ({
+    text: item.title || item.body || 'LMS announcement',
+    priority: tickerPriority(item)
+  })));
+  const sig = JSON.stringify([feed, localAnnouncements, annMode]);
+  if (sig === sigAnnouncements) return;
+  sigAnnouncements = sig;
+  $('announcementHeading').textContent = `Announcements · ${items.length} ${tldr.length ? 'TL;DR' : 'active'}`;
+  const highest = items.some(item => item.priority === 'urgent') ? 'urgent'
+    : items.some(item => item.priority === 'warning') ? 'warning' : 'info';
+  $('annBadge').className = `annBadge ${highest}`;
+  $('annBadgeText').textContent = `Announcements · ${items.length} ${tldr.length ? 'TL;DR' : 'active'}`;
+  const messages = items.map(item =>
+    `<span class="annMessage ${esc(item.priority)}"><i class="priority"></i>${esc(item.text)}</span>`).join('');
+  $('annTrack').innerHTML = messages
+    ? (annMode === 'continuous' ? messages + messages : messages)
+    : '<span class="annTickerEmpty">No active announcements.</span>';
+  // Keep continuous movement near 105 px/s. Duration follows actual rendered content
+  // instead of accelerating when the TL;DR grows.
+  requestAnimationFrame(() => {
+    const distance = $('annTrack').scrollWidth / (annMode === 'continuous' ? 2 : 1);
+    $('annTrack').style.setProperty('--ann-marquee-duration',
+      Math.max(17, Math.round(distance / 105)) + 's');
+  });
+  setAnnouncementMode(annMode);
+  const errs = feed.errors || [];
+  $('annFoot').textContent = feed.syncing ? 'Checking LMS announcements and refreshing TL;DR…'
+    : feed.summarizing ? 'Building actionable TL;DR…'
+    : feed.summary_error ? 'TL;DR unavailable — showing announcement titles'
+    : feed.schedule_error ? 'Schedule detection failed — ' + feed.schedule_error
+    : errs.length ? errs.length + ' course(s) failed — see console'
+    : 'Last sync ' + ((feed.synced_at || 'never').replace('T',' ').slice(0,19));
+  $('annFoot').className = (errs.length || feed.schedule_error) ? 'err' : 'muted';
+}
+
+$('annAdmin').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const input = $('annAdminText'), text = input.value.trim();
+  if (!text) return;
+  localAnnouncements.unshift({text, priority:$('annPriority').value, created:Date.now()});
+  localStorage.setItem('intuition-announcements', JSON.stringify(localAnnouncements));
+  input.value = '';
+  $('annAdminStatus').textContent = 'Announcement added to this dashboard.';
+  sigAnnouncements = null;
+  if (STATE) renderAnnouncements(STATE);
+});
+
+document.addEventListener('click', (ev) => {
+  if (!ev.target.dataset.annMode) return;
+  setAnnouncementMode(ev.target.dataset.annMode);
+});
+
+let activeLabCourse = null;
+let sigLabs = null;
+const LAB_STAGE_NAMES = {materials:'Materials', environment:'Environment', concepts:'Concepts', dry_run:'Dry run'};
+function renderLabs(s) {
+  const board = s.labs || {sessions:[], courses:[], stages:[]};
+  if (!activeLabCourse || !board.courses.includes(activeLabCourse)) activeLabCourse = board.courses[0] || null;
+  const sig = JSON.stringify([board, activeLabCourse]);
+  if (sig === sigLabs) return;
+  sigLabs = sig;
+  $('labTabs').innerHTML = board.courses.map(c =>
+    `<button class="labTab" id="lab-tab-${esc(c)}" data-lab-course="${esc(c)}" role="tab"
+      aria-controls="labBody" aria-selected="${c === activeLabCourse}"
+      tabindex="${c === activeLabCourse ? '0' : '-1'}">${esc(c)}</button>`).join('');
+  $('labBody').setAttribute('aria-labelledby', activeLabCourse ? `lab-tab-${activeLabCourse}` : '');
+  const lab = board.sessions.find(x => x.course === activeLabCourse);
+  if (!lab) {
+    $('labBody').innerHTML = '<span class="muted">No supported labs found in the imported timetable.</span>';
+    return;
+  }
+  const done = lab.completed || [], pack = lab.pack;
+  $('labBody').innerHTML = `
+    <div class="labHero">
+      <div><span class="labCourse">${esc(lab.course)} · ${esc(lab.title)}</span>
+        <span class="labMeta">${esc(lab.day)} ${esc(lab.start)}–${esc(lab.end)} · ${esc(lab.venue)} · ${esc(lab.weeks || 'every week')}</span></div>
+      <div><span class="muted">READINESS ${lab.readiness}%</span><div class="labGauge"><i style="width:${lab.readiness}%"></i></div></div>
+      <button class="primary" data-lab-prepare="${esc(lab.course)}">${pack ? 'Refresh prep pack' : 'Prepare next lab'}</button>
+    </div>
+    <div class="labStages">${board.stages.map(stage =>
+      `<button class="labStage ${done.includes(stage) ? 'done' : ''}" data-lab-key="${esc(lab.key)}" data-lab-stage="${esc(stage)}">${done.includes(stage) ? '✓ ' : '○ '}${esc(LAB_STAGE_NAMES[stage] || stage)}</button>`).join('')}</div>
+    ${pack ? `<div class="labPack">
+      <div class="labCard"><b>Environment</b>${esc(pack.environment)}</div>
+      <div class="labCard"><b>Concept drill</b>${esc(pack.drill)}</div>
+      <div class="labCard"><b>Source lock</b><span class="labSources">${esc(pack.material_status)}${pack.materials.length ? ': ' + esc(pack.materials.join(', ')) : ''}</span></div>
+    </div><span class="muted" style="display:block;margin-top:8px;font-size:9px">${esc(pack.guardrail)} · generated ${esc(pack.generated_at.replace('T',' '))}</span>`
+      : '<span class="muted" style="font-size:11px">Run preparation to inspect available course material and assemble the readiness sequence.</span>'}`;
+}
+
+document.addEventListener('click', async (ev) => {
+  if (ev.target.dataset.labCourse) {
+    activeLabCourse = ev.target.dataset.labCourse; sigLabs = null; await refresh(); return;
+  }
+  try {
+    if (ev.target.dataset.labPrepare) {
+      ev.target.disabled = true; ev.target.textContent = 'Assembling…';
+      await api('/api/labs', {action:'prepare', course:ev.target.dataset.labPrepare});
+      sigLabs = null; await refresh(); return;
+    }
+    if (ev.target.dataset.labKey) {
+      await api('/api/labs', {action:'toggle', key:ev.target.dataset.labKey, stage:ev.target.dataset.labStage});
+      sigLabs = null; await refresh();
+    }
+  } catch (e) { alert(e.message); }
+});
+
+document.addEventListener('keydown', (ev) => {
+  if (!ev.target.classList || !ev.target.classList.contains('labTab')) return;
+  const tabs = [...document.querySelectorAll('.labTab')];
+  let next = ev.key === 'Home' ? 0 : ev.key === 'End' ? tabs.length - 1 : -1;
+  if (ev.key === 'ArrowRight') next = (tabs.indexOf(ev.target) + 1) % tabs.length;
+  if (ev.key === 'ArrowLeft') next = (tabs.indexOf(ev.target) - 1 + tabs.length) % tabs.length;
+  if (next < 0) return;
+  ev.preventDefault();
+  activeLabCourse = tabs[next].dataset.labCourse;
+  sigLabs = null;
+  renderLabs(STATE);
+  [...document.querySelectorAll('.labTab')]
+    .find(tab => tab.dataset.labCourse === activeLabCourse)?.focus();
+});
+
+let sigTodo = null;
+const todoDrafts = {};
+/* Findings come back as markdown, so they need rendering before KaTeX runs.
+   The text is untrusted model output: it is escaped before any markup is built,
+   and math is lifted out first so LaTeX (dense with * and _) survives the inline
+   rules unmangled, then restored escaped. No raw model text reaches innerHTML. */
+function mdToHtml(raw) {
+  const math = [];
+  let src = String(raw).replace(/\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)/g,
+    m => '\u0000M' + (math.push(m) - 1) + '\u0000');
+  src = esc(src);
+  const blocks = [];
+  src = src.replace(/```[^\n]*\n?([\s\S]*?)```/g, (_, body) =>
+    '\u0000B' + (blocks.push('<pre><code>' + body.replace(/\n+$/, '') + '</code></pre>') - 1) + '\u0000');
+
+  const inline = t => t
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[\s([])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/(^|[\s([])_([^_\n]+)_/g, '$1<em>$2</em>');
+
+  const out = [];
+  let list = null, para = [];
+  const flushPara = () => { if (para.length) { out.push('<p>' + inline(para.join(' ')) + '</p>'); para = []; } };
+  const closeList = () => { if (list) { out.push('</' + list + '>'); list = null; } };
+  const openList = (tag) => { if (list !== tag) { closeList(); out.push('<' + tag + '>'); list = tag; } };
+
+  const lines = src.split('\n');
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex];
+    const bare = line.trim();
+    if (/^\u0000B\d+\u0000$/.test(bare)) { flushPara(); closeList(); out.push(bare); continue; }
+    if (!bare) { flushPara(); closeList(); continue; }
+    // Display math alone on a line becomes its own block, never a paragraph.
+    if (/^\u0000M\d+\u0000$/.test(bare)) { flushPara(); closeList(); out.push('<p>' + bare + '</p>'); continue; }
+    if (/^(---+|\*\*\*+|___+)$/.test(bare)) { flushPara(); closeList(); out.push('<hr>'); continue; }
+    const h = bare.match(/^(#{1,6})\s+(.+?)\s*#*$/);
+    if (h) {
+      flushPara(); closeList();
+      const lv = h[1].length <= 2 ? 4 : 5;
+      out.push('<h' + lv + '>' + inline(h[2]) + '</h' + lv + '>');
+      continue;
+    }
+    if (bare.startsWith('|') && /^\|?\s*:?-{3,}/.test((lines[lineIndex + 1] || '').trim())) {
+      flushPara(); closeList();
+      const cells = value => value.replace(/^\||\|$/g, '').split('|').map(cell => inline(cell.trim()));
+      const heads = cells(bare); lineIndex += 2;
+      const rows = [];
+      while (lineIndex < lines.length && lines[lineIndex].trim().startsWith('|')) {
+        rows.push(cells(lines[lineIndex].trim())); lineIndex++;
+      }
+      lineIndex--;
+      out.push('<table><thead><tr>' + heads.map(cell => '<th>' + cell + '</th>').join('')
+        + '</tr></thead><tbody>' + rows.map(row => '<tr>' + row.map(cell => '<td>' + cell + '</td>').join('') + '</tr>').join('') + '</tbody></table>');
+      continue;
+    }
+    const quote = bare.match(/^>\s?(.*)$/);
+    if (quote) { flushPara(); closeList(); out.push('<blockquote>' + inline(quote[1]) + '</blockquote>'); continue; }
+    const ul = bare.match(/^[-*+]\s+(.*)$/);
+    if (ul) { flushPara(); openList('ul'); out.push('<li>' + inline(ul[1]) + '</li>'); continue; }
+    const ol = bare.match(/^\d+[.)]\s+(.*)$/);
+    if (ol) { flushPara(); openList('ol'); out.push('<li>' + inline(ol[1]) + '</li>'); continue; }
+    para.push(bare);
+  }
+  flushPara(); closeList();
+
+  return out.join('')
+    .replace(/\u0000B(\d+)\u0000/g, (_, i) => blocks[+i])
+    .replace(/\u0000M(\d+)\u0000/g, (_, i) => esc(math[+i]));
+}
+
+/* Markdown and math are tracked separately: KaTeX is deferred, so it can land
+   either side of a render and must still find already-formatted findings. */
+function renderNeuralMath() {
+  document.querySelectorAll('.todoFindingText, .materialMessage.assistant').forEach(el => {
+    // FRIDAY messages have already passed through mdToHtml. Findings arrive as
+    // plain text and still need that first step before KaTeX sees them.
+    if (el.classList.contains('todoFindingText') && !el.dataset.mdRendered) {
+      el.innerHTML = mdToHtml(el.textContent);
+      el.dataset.mdRendered = '1';
+    }
+    if (el.dataset.mathRendered || typeof renderMathInElement !== 'function') return;
+    renderMathInElement(el, {
+      delimiters: [
+        {left:'\\[', right:'\\]', display:true},
+        {left:'$$', right:'$$', display:true},
+        {left:'\\(', right:'\\)', display:false}
+      ],
+      throwOnError:false, strict:'warn', trust:false, output:'htmlAndMathml'
+    });
+    el.dataset.mathRendered = '1';
+  });
+}
+function todoCourses(s, items) {
+  const codes = new Set(['General']);
+  (s.courses || []).forEach(c => { const code = codeFrom(c.name); if (code) codes.add(code); });
+  items.forEach(i => { if (i.course) codes.add(i.course); });
+  return [...codes].sort((a, b) => a === 'General' ? -1 : b === 'General' ? 1 : a.localeCompare(b));
+}
+function renderTodo(s) {
+  const q = s.todo || {items:[], counts:{}};
+  const items = q.items || [];
+  const busy = q.busy || [], errs = q.errors || {}, ai = q.ai || {};
+  renderTodoModels(q);
+  $('todoAiState').textContent = ai.ready
+    ? `${ai.backend || 'AI'} · ${ai.model || 'auto'}` : 'AI provider unavailable';
+  $('todoBadge').textContent = items.length;
+  $('todoHeading').textContent = `Active neural queries · ${items.length}`;
+  $('todoBadge').className = 'v ' + (items.length ? 'warn' : 'on');
+  $('todoDropLabel').textContent = items.length
+    ? `${items.length} active quer${items.length === 1 ? 'y' : 'ies'}` : 'Query matrix clear';
+  const courses = todoCourses(s, items), courseSelect = $('todoCourse');
+  const selectedCourse = courseSelect.value || 'General';
+  const courseSig = JSON.stringify(courses);
+  if (courseSelect.dataset.sig !== courseSig) {
+    courseSelect.innerHTML = courses.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    courseSelect.value = courses.includes(selectedCourse) ? selectedCourse : 'General';
+    courseSelect.dataset.sig = courseSig;
+  }
+  const sig = JSON.stringify([items, busy, errs, ai.ready, courses]);
+  if (sig === sigTodo) return;
+  sigTodo = sig;
+  const grouped = new Map();
+  items.forEach(i => { const code = i.course || 'General'; if (!grouped.has(code)) grouped.set(code, []); grouped.get(code).push(i); });
+  $('todoList').innerHTML = items.length ? [...grouped].flatMap(([course, courseItems]) => [
+    `<div class="todoCourseLabel">${esc(course)} · ${courseItems.length}</div>`,
+    ...courseItems.map(i => {
+    const running = busy.includes(i.id), finding = i.research;
+    return `<article class="todoItem">
+      <div><div class="todoTitle">${esc(i.title)}</div>
+        ${i.details ? `<div class="todoDetails">${esc(i.details)}</div>` : ''}
+      </div>
+      <div class="todoActions">
+        <button class="todoRun" data-todo-run="1" data-id="${esc(i.id)}" ${running || !ai.ready ? 'disabled' : ''}>${running ? 'running…' : (finding ? 'rerun' : 'run')}</button>
+        ${finding ? `<button class="todoRemove" data-todo-clear="1" data-id="${esc(i.id)}" title="Clear result">⌫</button>` : ''}
+        <button class="todoRemove" data-todo-remove="1" data-id="${esc(i.id)}" title="Remove query">×</button>
+      </div>
+      ${errs[i.id] ? `<div class="todoErr">${esc(errs[i.id])}</div>` : ''}
+      ${finding ? `<details class="todoFinding"><summary>AI response · ${esc(finding.backend || '')} / ${esc(finding.model || '')}</summary><div class="todoFindingText">${esc(finding.text || '')}</div></details>` : ''}
+    </article>`;
+    })
+  ]).join('') : '<span class="muted" style="font-size:11px;padding:12px">No active neural queries.</span>';
+  renderNeuralMath();
+}
+function renderTodoModels(q) {
+  const backend = $('todoBackend').value || 'auto';
+  const options = (q.model_options || {})[backend] || [{value:'auto', label:'Auto model'}];
+  const model = $('todoModel');
+  const previous = model.dataset.backend === backend ? model.value : 'auto';
+  const signature = JSON.stringify(options);
+  if (model.dataset.sig !== signature || model.dataset.backend !== backend) {
+    model.innerHTML = options.map(item =>
+      `<option value="${esc(item.value)}">${esc(item.label)}</option>`).join('');
+    model.value = options.some(item => item.value === previous) ? previous : 'auto';
+    model.dataset.sig = signature;
+    model.dataset.backend = backend;
+  }
+}
+$('todoBackend').onchange = () => {
+  renderTodoModels((STATE && STATE.todo) || {});
+  $('todoModel').focus();
+};
+$('todoCourse').onchange = () => {
+  $('todoTitle').value = todoDrafts[$('todoCourse').value] || '';
+  $('todoTitle').focus();
+};
+$('todoTitle').oninput = () => { todoDrafts[$('todoCourse').value || 'General'] = $('todoTitle').value; };
+$('todoAdd').onclick = async () => {
+  const title = $('todoTitle').value.trim();
+  if (!title) { $('todoTitle').focus(); return; }
+  try {
+    const course = $('todoCourse').value === 'General' ? '' : $('todoCourse').value;
+    await api('/api/todo', {action:'add', title, course});
+    todoDrafts[$('todoCourse').value] = ''; $('todoTitle').value = ''; sigTodo = null; await refresh();
+  } catch (e) { alert(e.message); }
+};
+$('todoTitle').onkeydown = (ev) => {
+  if (ev.key === 'Enter') { ev.preventDefault(); $('todoAdd').click(); }
+};
+document.addEventListener('click', async (ev) => {
+  const id = ev.target.dataset.id;
+  if (!id) return;
+  try {
+    if (ev.target.dataset.todoRun) await api('/api/todo', {action:'research', id,
+      backend:$('todoBackend').value, model:$('todoModel').value});
+    else if (ev.target.dataset.todoClear) await api('/api/todo', {action:'clear_research', id});
+    else if (ev.target.dataset.todoRemove && confirm('Remove this neural query?')) await api('/api/todo', {action:'remove', id});
+    sigTodo = null; await refresh();
+  } catch (e) { alert(e.message); }
+});
+
 // Core systems reads out the pipeline's real state rather than invented gauges.
-// Inbound: Cerberus's flagged NTU mail, read-only. Signature-gated like the rest so
+// Inbound: triaged NTU mail. Signature-gated like the rest so
 // the 1.2s poll cannot reset a scroll position mid-read.
 let sigInbound = null;
 
-// Cerberus writes whole sentences (with URLs) into action_items; one line of panel
+// Triage writes whole sentences (with URLs) into action_items; one line of panel
 // is enough to decide whether to open the mail.
 function clip(text, n) {
   text = String(text || '').replace(/\s+/g, ' ').trim();
@@ -810,11 +1804,14 @@ function clip(text, n) {
 
 function renderInbound(s) {
   const b = s.inbound || {available: false, flags: []};
+  $('inboundHeading').textContent = `Inbound · ${(b.flags || []).length} open`;
   const panel = $('inboundPanel');
-  panel.style.display = b.available ? '' : 'none';
-  if (!b.available) return;
+  panel.style.display = '';
+  $('inboundSync').disabled = !!b.syncing;
+  $('inboundSyncState').textContent = b.syncing ? 'checking mailbox…' : (b.error || '');
+  $('inboundSyncState').className = b.syncing ? 'scanning' : (b.error ? 'err' : 'muted');
 
-  const sig = JSON.stringify([b.flags, b.total]);
+  const sig = JSON.stringify([b.available, b.flags, b.total, b.scan]);
   if (sig === sigInbound) return;
   sigInbound = sig;
 
@@ -827,19 +1824,39 @@ function renderInbound(s) {
             ? `<a href="${esc(f.link)}" target="_blank" rel="noreferrer">${esc(f.title)}</a>`
             : esc(f.title)}</span>
           <span class="who">${esc(f.sender)} · ${esc((f.flagged_at || '').slice(0, 10))}
-            ${f.confidence ? ' · ' + Math.round(f.confidence * 100) + '% conf' : ''}</span>
+            ${f.confidence ? ' · ' + Math.round(f.confidence * 100) + '% conf' : ''}
+            ${f.duplicate_count > 1 ? `<span class="dupes"> · ${f.duplicate_count} related</span>` : ''}</span>
           ${(f.actions || []).length
             ? `<span class="act">▸ ${esc(clip(f.actions[0], 150))}</span>` : ''}
+          ${f.due ? `<span class="due${f.due < new Date().toISOString().slice(0,10) ? ' overdue' : ''}">
+            ${f.due < new Date().toISOString().slice(0,10) ? 'OVERDUE' : 'DUE'} ${esc(f.due)}</span>` : ''}
         </span>
+        <button class="inbDone" data-inbound-ids="${esc(JSON.stringify(f.ids || [f.id]))}">Done</button>
       </div>`).join('')
     : '<span class="muted" style="font-size:12px">Nothing flagged as needing action.</span>';
 
   const c = b.counts || {};
+  const scan = b.scan || {};
+  const checked = scan.completed_at ? scan.completed_at.replace('T', ' ').slice(0, 16) : 'never';
   $('inboundFoot').textContent =
-    'From cerberus triage, read-only: ' +
+    'Checked ' + checked + (scan.status && scan.status !== 'ok' ? ' · ' + scan.status : '') + ' · ' +
     (Object.keys(c).map(k => c[k] + ' ' + k).join(', ') || 'none open') +
-    '. Mark them done in cerberus; this view never writes.';
+    '. Caught incoming mail is marked read in Outlook.';
 }
+
+$('inboundSync').onclick = async () => {
+  try { await api('/api/inbound', {action:'sync'}); await refresh(); }
+  catch (e) { alert(e.message); }
+};
+
+document.addEventListener('click', async (ev) => {
+  const raw = ev.target.dataset.inboundIds;
+  if (!raw) return;
+  try {
+    await api('/api/inbound', {action:'done', ids:JSON.parse(raw)});
+    sigInbound = null; await refresh();
+  } catch (e) { alert(e.message); }
+});
 
 // R&D board: one list across every course. Selection/filter state is client-side and
 // the rebuild is gated on a signature, so the 1.2s poll cannot wipe a half-typed entry.
@@ -848,41 +1865,42 @@ let sigRnd = null;
 
 function renderRnd(s) {
   const b = s.rnd || {items: [], counts: {}, courses: []};
-  const enrolled = (s.courses || []).map(c => {
-    const m = /([A-Z]{2,4}\d{4})/.exec(c.name || '');
-    return m ? m[1] : null;
-  }).filter(Boolean);
-  const known = [...new Set([...enrolled, ...(b.courses || [])])].sort();
-
   const r = s.research || {};
   const busy = r.busy || [];
   const errs = r.errors || {};
+  // Course names, not just codes: the dropdown labels itself from the full name, so a
+  // renamed course has to invalidate this too.
+  const known = [(s.courses || []).map(c => c.name || ''), b.courses || []];
 
-  const sig = JSON.stringify([b.items, rndFilter, known, busy, errs, r.ready, r.backend, r.materials]);
+  const sig = JSON.stringify([b.items, rndFilter, known, busy, errs, r.ready, r.backend,
+                              r.materials, b.direction]);
   if (sig === sigRnd) return;
   sigRnd = sig;
 
-  $('rndMaterials').checked = !!r.materials;
+  renderDirection(b);
+  renderAutoCourses(s, b);
+  $('rndAuto').disabled = !r.ready || busy.length > 0 || !$('rndAutoCourse').value;
+  $('rndAuto').textContent = busy.length ? 'AI researching…' : 'Run autonomous research';
   $('rndBackend').textContent = !r.ready
-    ? 'Research backend off: install the Claude CLI (uses your existing login), or '
-      + 'set an Anthropic API key.'
+    ? 'Research backend off: install OmniRoute, the Claude CLI, or configure an Anthropic API key.'
+    : r.backend === 'omniroute'
+      ? (r.running ? 'OmniRoute is online' : 'OmniRoute starts automatically on first use')
+        + ' · model routing: ' + (r.model || 'auto') + ' · localhost:20128'
     : r.backend === 'cli'
       ? 'Research runs ' + (r.model || 'opus') + ' through the Claude CLI '
         + (r.cli_version ? '(' + r.cli_version + ') ' : '')
         + 'in an isolated session: no CLAUDE.md, skills, MCP or history, capped at $'
         + (r.max_usd || 1) + ' per entry. It searches the web and GitHub, and sends '
-        + 'the entry plus your course codes. '
+        + 'the generated research brief plus your course codes. '
         + (r.materials
             ? 'Materials sharing is ON: up to '
               + ((r.material_caps || {}).files || 12) + ' readable files ('
               + ((r.material_caps || {}).mb || 12) + 'MB) for the entry’s own '
               + 'course are staged for the run, then deleted. Each finding lists what '
               + 'it read.'
-            : 'Materials sharing is off: no course files are shared.')
+            : 'No course files are shared when the autonomous brief is cross-course.')
       : 'Research runs ' + (r.model || '') + ' via ' + (r.source || 'a stored credential')
         + '. It sends the entry and your course codes; course files are CLI-only.';
-
-  $('rndCourses').innerHTML = known.map(c => `<option value="${esc(c)}">`).join('');
 
   const counts = b.counts || {};
   const total = (b.items || []).length;
@@ -912,17 +1930,17 @@ function renderRnd(s) {
               data-research="${esc(i.id)}"
               ${busy.includes(i.id) || !r.ready ? 'disabled' : ''}
               title="${r.ready
-                ? 'Ask Claude to research this entry (' + (r.backend || '') + ')'
+                ? 'Run AI research on this entry (' + (r.backend || '') + ')'
                 : 'Research backend not configured'}"
         >${busy.includes(i.id) ? 'working' : (i.research ? 'redo' : 'research')}</button>
       <button class="rndDel" data-remove="${esc(i.id)}" title="Delete">✕</button>
     </div>`).join('')
     : `<span class="muted" style="font-size:12px">${
         total ? 'Nothing at this status.'
-              : 'No entries yet. Log a tool you are thinking about building.'}</span>`;
+              : 'No findings yet. Run autonomous research to let the AI choose a direction.'}</span>`;
 }
 
-// Claude answers in a little Markdown. Escape first, then re-introduce only bold and
+// Research answers use a little Markdown. Escape first, then re-introduce only bold and
 // line breaks - nothing from the response is ever inserted as live markup.
 function md(text) {
   // Split the raw text on links first so a URL is escaped as one unit; only http(s)
@@ -968,18 +1986,98 @@ async function rndAction(body) {
   try { await api('/api/rnd', body); sigRnd = null; await refresh(); }
   catch (e) { alert(e.message); }
 }
-$('rndAdd').onclick = () => {
-  const title = $('rndTitle').value.trim();
-  if (!title) return;
-  const course = $('rndCourse').value.trim();
-  $('rndTitle').value = '';
-  rndAction({action: 'add', title, course});
+
+// The autonomous run picks a course from what is actually synced, rather than asking
+// you to remember a code. Two groups, because a board entry can outlive the semester
+// whose course list it came from - dropping those codes would make an old entry's
+// course unreachable, so they stay selectable and are labelled as no longer synced.
+// "AY2026-2027, Semester 1, MH2100 (Calculus III)" - the academic year has the exact
+// shape of a course code and comes first in the name, so a naive match returns AY2026.
+// It is never a course.
+function codeFrom(name) {
+  const all = (name || '').toUpperCase().match(/\b[A-Z]{2,4}\d{4}\b/g) || [];
+  return all.filter(c => !c.startsWith('AY'))[0] || null;
+}
+
+function courseOptions(s, b) {
+  const synced = [], seen = new Set();
+  (s.courses || []).forEach(c => {
+    const code = codeFrom(c.name);
+    if (!code || seen.has(code)) return;
+    seen.add(code);
+    synced.push({code: code, label: c.name || ''});
+  });
+  synced.sort((x, y) => x.code.localeCompare(y.code));
+  const extra = (b.courses || []).filter(c => c && !seen.has(c)).sort();
+  return {synced, extra};
+}
+
+function renderAutoCourses(s, b) {
+  const sel = $('rndAutoCourse');
+  const chosen = sel.value;                 // survives the poll-driven rebuild below
+  const {synced, extra} = courseOptions(s, b);
+  const group = (label, opts) =>
+    opts.length ? `<optgroup label="${esc(label)}">${opts.join('')}</optgroup>` : '';
+
+  sel.innerHTML = (!synced.length && !extra.length)
+    ? '<option value="">No courses synced — use Sync in the header</option>'
+    : '<option value="">Choose a course…</option>'
+      + group('Synced this semester', synced.map(c =>
+          `<option value="${esc(c.code)}" title="${esc(c.label)}">${esc(clip(c.label, 44))}</option>`))
+      + group('On the board, no longer synced', extra.map(c =>
+          `<option value="${esc(c)}">${esc(c)}</option>`));
+
+  if (chosen && [...sel.options].some(o => o.value === chosen)) sel.value = chosen;
+  sel.disabled = !synced.length && !extra.length;
+}
+
+// Research direction: optional, board-wide, and applied to every run. Never written
+// back into the box while it has focus, so the 1.2s poll cannot eat a half-typed steer.
+function renderDirection(b) {
+  const box = $('rndDirection'), wrap = $('rndDirectionWrap');
+  const text = b.direction || '';
+  if (document.activeElement !== box) box.value = text;
+  box.maxLength = b.direction_max || 1000;
+  wrap.classList.toggle('set', !!text);
+  if (text && !wrap.open && !wrap.dataset.touched) wrap.open = true;
+  $('rndDirectionSummary').innerHTML = 'Research direction '
+    + (text ? '<span class="muted">(applies to every run)</span>'
+            : '<span class="muted">(optional)</span>');
+  directionFoot(b);
+}
+
+function directionFoot(b) {
+  const box = $('rndDirection'), max = b.direction_max || 1000;
+  const n = box.value.length;
+  $('rndDirectionFoot').textContent = box.value.trim()
+    ? `Sent with every research run, alongside the entry. ${n}/${max} characters. `
+      + 'Clear the box to stop sending it.'
+    : 'Optional. A standing steer for what research should favour — it guides the '
+      + 'autonomous run\'s choice of question too. Nothing is sent until you research.';
+}
+
+$('rndDirection').oninput = () => directionFoot((STATE && STATE.rnd) || {});
+$('rndDirectionWrap').ontoggle = () => { $('rndDirectionWrap').dataset.touched = '1'; };
+// Saved on blur rather than per keystroke: one write when you are done, not thirty.
+$('rndDirection').onblur = async () => {
+  const box = $('rndDirection');
+  const current = ((STATE && STATE.rnd && STATE.rnd.direction) || '');
+  if (box.value.trim() === current.trim()) return;
+  await rndAction({action: 'direction', direction: box.value});
 };
-$('rndMaterials').onchange = (ev) =>
-  rndAction({action: 'materials', on: ev.target.checked});
-$('rndTitle').addEventListener('keydown', (ev) => {
-  if (ev.key === 'Enter') $('rndAdd').click();
-});
+$('rndAutoCourse').onchange = () => {
+  const r = (STATE && STATE.research) || {};
+  $('rndAuto').disabled = !r.ready || (r.busy || []).length > 0
+    || !$('rndAutoCourse').value;
+};
+$('rndAutoCourse').onkeydown = (ev) => {
+  if (ev.key === 'Enter' && !$('rndAuto').disabled) $('rndAuto').click();
+};
+$('rndAuto').onclick = () => {
+  const course = $('rndAutoCourse').value.trim().toUpperCase();
+  if (!course) return;
+  rndAction({action: 'auto', course});
+};
 document.addEventListener('click', (ev) => {
   const adv = ev.target.closest('[data-advance]');
   if (adv) return rndAction({action: 'advance', id: adv.dataset.advance});
@@ -1033,62 +2131,72 @@ function renderMetrics(s) {
     </div>`).join('');
 }
 
-// NTU teaches Monday to Friday, so the strip is the teaching week. A weekend tab
-// appears only if the imported timetable actually has a class then (makeup
-// sessions happen), rather than hiding it with no way to reach it.
+// NTU teaches Monday to Friday, so the month view deliberately omits weekends.
 const TP_WEEKDAYS = ['MON','TUE','WED','THU','FRI'];
-let TP_DAYS = TP_WEEKDAYS.slice();
+let TP_DATES = [];
 const TP_FULL = {MON:'Monday', TUE:'Tuesday', WED:'Wednesday', THU:'Thursday',
                  FRI:'Friday', SAT:'Saturday', SUN:'Sunday'};
-// null means "follow today"; a click pins a specific day until you pick another.
+// null means "follow today"; a click pins a specific August date.
 let tpSelected = null;
+let tpWeekSelected = null;
 let sigTemporal = null;
+
+function tpLocalDateKey(day) {
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+}
 
 function renderTemporal(s) {
   const sc = s.schedule || {};
-  $('tpDate').textContent = sc.today || '—';
+  const now = new Date();
   $('tpClock').textContent = sc.clock || '--:--:--';
   // A timetable row saying "Wk2-13" only means something once you know which
   // teaching week today is; the phase comes from NTU's published calendar.
-  $('tpPhase').textContent = sc.phase || 'Academic calendar unknown for this semester';
+  $('tpPhase').textContent = (sc.phase || 'Academic calendar unknown for this semester')
+    + ((sc.changes || []).length ? ` · ${(sc.changes || []).length} announcement change(s)` : '');
 
-  const week = sc.week || {};
-  TP_DAYS = TP_WEEKDAYS.concat(
-    ['SAT', 'SUN'].filter(d => (week[d] || []).length));
-  // On a free weekend there is no tab for today; default the view to Monday
-  // instead of leaving nothing selected.
+  const weeks = sc.teaching_weeks || [];
+  const currentWeek = sc.teaching_week || (weeks[0] || {}).week || 1;
+  if (!weeks.some(item => item.week === tpWeekSelected)) tpWeekSelected = currentWeek;
+  const selectedWeek = weeks.find(item => item.week === tpWeekSelected)
+    || {week: currentWeek, monday: tpLocalDateKey(now), schedule: sc.week || {}};
+  const week = selectedWeek.schedule || {};
   const today = sc.day || ['MON','TUE','WED','THU','FRI','SAT','SUN'][
     (new Date().getDay() + 6) % 7];
-  const active = tpSelected || (TP_DAYS.includes(today) ? today : 'MON');
-
-  // Dates for the current Mon-Sun window, so the strip reads as a real week.
-  const now = new Date();
-  const monday = new Date(now);
-  monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+  const todayKey = tpLocalDateKey(now);
+  const monday = new Date(`${selectedWeek.monday}T00:00:00`);
+  TP_DATES = TP_WEEKDAYS.map((day, offset) => {
+    const date = new Date(monday); date.setDate(monday.getDate() + offset);
+    return {date, key: tpLocalDateKey(date), day};
+  });
+  const defaultDate = TP_DATES.find(item => item.key === todayKey) || TP_DATES[0];
+  const selected = TP_DATES.find(item => item.key === tpSelected) || defaultDate;
+  const active = selected.day;
+  const friday = TP_DATES[4].date;
+  $('tpDate').textContent = `TEACHING WEEK ${selectedWeek.week} · ${monday.toLocaleDateString([], {day:'numeric', month:'short'})}–${friday.toLocaleDateString([], {day:'numeric', month:'short', year:'numeric'})}`;
+  const weekSelect = $('tpTeachingWeek');
+  weekSelect.innerHTML = weeks.map(item => `<option value="${item.week}" ${item.week === selectedWeek.week ? 'selected' : ''}>Week ${item.week}</option>`).join('');
 
   // Selection is part of the signature, otherwise clicking a tab would be undone by
   // the next poll.
-  const sig = JSON.stringify([week, today, active, TP_DAYS, now.toDateString()]);
+  const sig = JSON.stringify([week, today, selected.key, selectedWeek.week, todayKey]);
   if (sig === sigTemporal) return;
   sigTemporal = sig;
 
   $('tpWeek').className = 'tpWeek';
-  $('tpWeek').style.gridTemplateColumns = `repeat(${TP_DAYS.length}, 1fr)`;
-  $('tpWeek').innerHTML = TP_DAYS.map((d, i) => {
-    const day = new Date(monday); day.setDate(monday.getDate() + i);
-    const rows = week[d] || [];
+  $('tpWeek').innerHTML = TP_WEEKDAYS.map(d => `<span class="tpWeekHead" role="presentation">${d.slice(0, 2)}</span>`).join('')
+    + TP_DATES.map(item => {
+    const rows = week[item.day] || [];
     // One pip per class, capped so a heavy day does not blow the cell open.
     const pips = rows.slice(0, 5).map(() => '<i></i>').join('');
-    return `<button type="button" role="tab" class="tpDay${d === today ? ' today' : ''}"
-      aria-selected="${d === active}" data-day="${d}"
-      title="${TP_FULL[d]} — ${rows.length} class(es)">
-      <span class="d">${d[0]}${d[1].toLowerCase()}</span>
-      <span class="n">${day.getDate()}</span>
+    return `<button type="button" class="tpDay${item.key === todayKey ? ' today' : ''}"
+      aria-pressed="${item.key === selected.key}" data-day="${item.day}" data-date="${item.key}"
+      title="${TP_FULL[item.day]}, ${item.date.toLocaleDateString()} — ${rows.length} class(es)">
+      <span class="n">${item.date.getDate()}</span>
       <span class="pips">${pips}</span>
     </button>`;
   }).join('');
 
-  renderTemporalDay(s, active, today);
+  renderTemporalDay(s, active, selected.date, selected.key === todayKey ? today : null, week);
   renderScheduleSource(sc);
 }
 
@@ -1120,14 +2228,14 @@ function renderScheduleSource(sc) {
   }
 }
 
-function renderTemporalDay(s, active, today) {
+function renderTemporalDay(s, active, selectedDate, today, selectedWeek) {
   const sc = s.schedule || {};
-  const rows = (sc.week || {})[active] || [];
+  const rows = (selectedWeek || {})[active] || [];
 
   const allRows = ((sc.all_week || {})[active] || []).length;
   const hidden = allRows - rows.length;
   $('tpSubhead').textContent =
-    `${TP_FULL[active]} · ${rows.length} class${rows.length === 1 ? '' : 'es'}`
+    `${TP_FULL[active]}, ${selectedDate.toLocaleDateString([], {day:'numeric', month:'long'})} · ${rows.length} class${rows.length === 1 ? '' : 'es'}`
     + (active === today ? ' · today' : '')
     + (hidden > 0 ? ` · ${hidden} not this week` : '');
 
@@ -1152,7 +2260,8 @@ function renderTemporalDay(s, active, today) {
     const past = isToday && toMin(r.end) < nowMin;
     const isNext = i === nextIdx;
     const soon = isNext && toMin(r.start) - nowMin < 120;
-    const cls = past ? ' past' : soon ? ' soon' : isNext ? ' next' : '';
+    const cls = (past ? ' past' : soon ? ' soon' : isNext ? ' next' : '')
+      + (r.dynamic ? ' dynamic' : '');
     const mins = toMin(r.start) - nowMin;
     const rel = isNext
       ? (mins < 60 ? `in ${mins}m` : `in ${Math.floor(mins / 60)}h ${mins % 60}m`)
@@ -1162,6 +2271,7 @@ function renderTemporalDay(s, active, today) {
       <span class="what">${esc(r.course || '')} ${esc(r.type || '')}
         ${rel ? `<span class="muted">· ${esc(rel)}</span>` : ''}
         <span class="meta">${esc(r.weeks || '')}${r.index ? ' · idx ' + esc(r.index) : ''}</span>
+        ${r.dynamic ? `<span class="tpChange">Announcement: ${esc((r.change || {}).source_title || 'schedule updated')}</span>` : ''}
       </span>
       <span class="where">${esc(r.venue || '')}</span>
     </div>`;
@@ -1172,20 +2282,26 @@ function renderTemporalDay(s, active, today) {
 document.addEventListener('click', (ev) => {
   const btn = ev.target.closest('.tpDay');
   if (!btn || !STATE) return;
-  tpSelected = btn.dataset.day;
+  tpSelected = btn.dataset.date;
   sigTemporal = null;
   renderTemporal(STATE);
+});
+$('tpTeachingWeek').addEventListener('change', (ev) => {
+  tpWeekSelected = Number(ev.target.value);
+  tpSelected = null;
+  sigTemporal = null;
+  if (STATE) renderTemporal(STATE);
 });
 document.addEventListener('keydown', (ev) => {
   if (!ev.target.classList || !ev.target.classList.contains('tpDay')) return;
   const step = ev.key === 'ArrowRight' ? 1 : ev.key === 'ArrowLeft' ? -1 : 0;
   if (!step) return;
   ev.preventDefault();
-  const i = TP_DAYS.indexOf(ev.target.dataset.day);
-  tpSelected = TP_DAYS[(i + step + TP_DAYS.length) % TP_DAYS.length];
+  const i = TP_DATES.findIndex(item => item.key === ev.target.dataset.date);
+  tpSelected = TP_DATES[(i + step + TP_DATES.length) % TP_DATES.length].key;
   sigTemporal = null;
   renderTemporal(STATE);
-  const next = document.querySelector(`.tpDay[data-day="${tpSelected}"]`);
+  const next = document.querySelector(`.tpDay[data-date="${tpSelected}"]`);
   if (next) next.focus();
 });
 
@@ -1264,6 +2380,384 @@ function renderDrive(s) {
   }
 }
 
+function humanBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (!n) return '—';
+  const units = ['B','KB','MB','GB']; let value = n, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function renderPriority(s) {
+  const d = s.drive || {}, files = driveSearchResults;
+  if (!d.listing && d.file_count !== driveSearchInventoryCount) {
+    driveSearchInventoryCount = d.file_count;
+    setTimeout(searchDrive, 0);
+  }
+  const signature = JSON.stringify(files.map(f => [f.id, f.rel_path, f.size, f.modified]));
+  if (signature !== sigPriority) {
+    sigPriority = signature;
+    $('priorityList').innerHTML = files.map(f => `<article class="priorityFile">
+      <span class="path">${esc(f.rel_path)}</span><span class="size">${humanBytes(f.size)}</span>
+      <button type="button" class="primary priorityFetch" data-fetch="${esc(f.id)}">Study</button>
+    </article>`).join('') || `<span class="muted">${d.linked
+      ? 'Search for a course, topic, or filename. Recent materials appear here automatically.'
+      : 'Link Google Drive to access archived materials.'}</span>`;
+  }
+  $('driveRefresh').disabled = !d.configured || d.listing || s.pulling;
+  const pp = s.pull_progress || {};
+  $('pullBarWrap').style.display = s.pulling ? '' : 'none';
+  if (s.pulling && pp.total) {
+    const overall = ((pp.done + (pp.pct || 0) / 100) / pp.total) * 100;
+    $('pullBar').style.width = Math.min(100, Math.round(overall)) + '%';
+    $('priorityState').textContent = `${pp.done}/${pp.total} · ${pp.pct || 0}% · ${tail(pp.current, 42)}`;
+    $('priorityState').className = 'scanning';
+  } else {
+    $('priorityState').textContent = d.listing ? 'Updating Drive index…'
+      : `${files.length} result${files.length === 1 ? '' : 's'} · ${d.file_count || 0} indexed`;
+    $('priorityState').className = d.listing ? 'scanning' : 'muted';
+  }
+}
+
+let driveSearchResults = [];
+let driveSearchTimer = null;
+let driveSearchInventoryCount = -1;
+let driveSearchRequest = 0;
+const driveSpinnerVerbs = [
+  'Pondering', 'Cogitating', 'Ruminating', 'Conjuring', 'Brewing',
+  'Deliberating', 'Sifting', 'Unfurling', 'Percolating', 'Illuminating'
+];
+let driveVerbIndex = Math.floor(Math.random() * driveSpinnerVerbs.length);
+function rotateDriveVerb() {
+  driveVerbIndex = (driveVerbIndex + 1) % driveSpinnerVerbs.length;
+  $('driveVerb').textContent = driveSpinnerVerbs[driveVerbIndex];
+}
+setInterval(rotateDriveVerb, 10000);
+async function searchDrive() {
+  if (!STATE || (STATE.drive || {}).listing) return;
+  const query = $('driveSearch').value.trim();
+  const request = ++driveSearchRequest;
+  if (query.length < 2) {
+    driveSearchResults = [];
+    sigPriority = null;
+    renderPriority(STATE);
+    return;
+  }
+  $('priorityState').textContent = 'Searching Google Drive…';
+  $('priorityState').className = 'scanning';
+  try {
+    const result = await api('/api/drive/search', {query});
+    if (request !== driveSearchRequest) return;
+    driveSearchResults = result.items || [];
+    sigPriority = null;
+    renderPriority(STATE);
+    $('priorityState').textContent = `${driveSearchResults.length} result${driveSearchResults.length === 1 ? '' : 's'} · ${result.engine}`;
+    $('priorityState').className = 'muted';
+  } catch (e) {
+    if (request !== driveSearchRequest) return;
+    $('priorityState').textContent = e.message;
+    $('priorityState').className = 'err';
+  }
+}
+$('driveSearch').addEventListener('input', () => {
+  clearTimeout(driveSearchTimer);
+  driveSearchTimer = setTimeout(searchDrive, 500);
+});
+
+let materialItem = null;
+let materialSnapshotData = '';
+let materialCaptureCanvas = null;
+let materialCaptureStream = null;
+let materialCaptureVideo = null;
+let materialNoteVersion = '';
+let materialNoteTimer = null;
+let materialNoteDirty = false;
+let notesSearchTimer = null;
+const MATERIAL_CHAT_SESSION = (() => {
+  const key = 'intuition-material-chat-session';
+  let value = localStorage.getItem(key);
+  if (!value) {
+    value = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    localStorage.setItem(key, value);
+  }
+  return value;
+})();
+
+function renderMaterialHistory(items) {
+  const intro = '<div class="materialChatIntro">Ask for an explanation, summary, worked example, or revision questions. Responses are grounded in the material displayed beside this workspace. Recent outputs are remembered locally.</div>';
+  $('materialChatLog').innerHTML = intro + (items || []).map(turn => turn.role === 'user'
+    ? `<article class="materialMessage user"><div class="materialMessageLabel">You</div><div>${esc(turn.content)}</div></article>`
+    : `<article class="materialMessage assistant"><div class="materialMessageLabel">FRIDAY</div>${mdToHtml(turn.content)}<div class="materialMeta">${esc(turn.backend || 'AI')} · ${esc(turn.model || '')}</div></article>`).join('');
+  renderNeuralMath();
+  scrollMaterialChat();
+}
+
+function scrollMaterialChat() {
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    $('materialChatLog').scrollTo({top:$('materialChatLog').scrollHeight, behavior:'smooth'});
+  }));
+}
+
+function switchStudyPane(name) {
+  const notes = name === 'notes';
+  $('notesTab').setAttribute('aria-selected', String(notes));
+  $('fridayTab').setAttribute('aria-selected', String(!notes));
+  $('notesPane').classList.toggle('active', notes);
+  $('fridayPane').classList.toggle('active', !notes);
+  if (notes) $('notesEditor').focus(); else $('materialChatQuestion').focus();
+}
+
+function updateNoteMetrics() {
+  const text = $('notesEditor').value.trim();
+  $('notesCount').textContent = `${text ? text.split(/\s+/).length : 0} words`;
+}
+
+async function loadMaterialNote(item) {
+  materialNoteVersion = '';
+  materialNoteDirty = false;
+  $('notesEditor').value = '';
+  $('notesState').textContent = 'Loading local notes…';
+  try {
+    const result = await api(`/api/notes?id=${encodeURIComponent(item.id)}`);
+    if (!materialItem || materialItem.id !== item.id) return;
+    const note = result.note || {};
+    $('notesEditor').value = note.markdown || '';
+    materialNoteVersion = note.updated_at || '';
+    $('notesState').textContent = note.updated_at ? 'Saved locally' : 'New local note';
+    updateNoteMetrics();
+  } catch (e) {
+    $('notesState').textContent = e.message;
+    $('notesState').className = 'err';
+  }
+}
+
+async function saveMaterialNote() {
+  clearTimeout(materialNoteTimer);
+  if (!materialItem || !materialNoteDirty) return;
+  const item = materialItem;
+  const markdown = $('notesEditor').value;
+  $('notesState').textContent = 'Saving…';
+  $('notesState').className = '';
+  try {
+    const result = await api('/api/notes', {id:item.id, markdown,
+      expected_updated_at:materialNoteVersion, last_page:1});
+    if (!materialItem || materialItem.id !== item.id) return;
+    materialNoteVersion = (result.note || {}).updated_at || '';
+    materialNoteDirty = false;
+    $('notesState').textContent = 'Saved locally';
+  } catch (e) {
+    $('notesState').textContent = e.message + ' · copy your text before reloading';
+    $('notesState').className = 'err';
+  }
+}
+
+function scheduleMaterialNoteSave() {
+  materialNoteDirty = true;
+  $('notesState').textContent = 'Unsaved changes';
+  updateNoteMetrics();
+  clearTimeout(materialNoteTimer);
+  materialNoteTimer = setTimeout(saveMaterialNote, 700);
+}
+
+function openMaterial(item) {
+  materialItem = item;
+  $('materialTitle').textContent = item.rel_path;
+  $('materialMeta').textContent = `${item.mime_type || 'Unknown type'} · ${humanBytes(item.size)}`;
+  $('materialChatContext').textContent = item.rel_path;
+  switchStudyPane('notes');
+  loadMaterialNote(item);
+  renderMaterialHistory([]);
+  api(`/api/drive/memory?session=${encodeURIComponent(MATERIAL_CHAT_SESSION)}&id=${encodeURIComponent(item.id)}`)
+    .then(result => { if (materialItem && materialItem.id === item.id) renderMaterialHistory(result.items); })
+    .catch(() => {});
+  $('materialChatQuestion').value = '';
+  clearMaterialSnapshot();
+  const src = '/api/drive/content?id=' + encodeURIComponent(item.id);
+  const mime = item.mime_type || '';
+  let content;
+  if (mime.startsWith('image/')) content = `<img src="${src}" alt="">`;
+  else if (mime.startsWith('video/')) content = `<video src="${src}" controls autoplay></video>`;
+  else if (mime.startsWith('audio/')) content = `<audio src="${src}" controls autoplay></audio>`;
+  else if (mime === 'application/pdf' || mime.startsWith('text/')
+      || mime === 'application/vnd.google-apps.document'
+      || mime === 'application/vnd.google-apps.presentation') {
+    content = `<iframe src="${src}" title="${esc(item.name || 'Material preview')}"></iframe>`;
+  } else content = `<div class="materialFallback">This file type cannot be rendered safely in the browser.<br>
+    This file type cannot be displayed inside the dashboard.</div>`;
+  $('materialBody').innerHTML = content;
+  document.body.classList.add('materialOpen');
+  $('materialDrawer').setAttribute('aria-hidden', 'false');
+  $('materialChat').setAttribute('aria-hidden', 'false');
+  $('materialClose').focus();
+}
+function closeMaterial() {
+  saveMaterialNote();
+  document.body.classList.remove('materialOpen');
+  $('materialDrawer').setAttribute('aria-hidden', 'true');
+  $('materialChat').setAttribute('aria-hidden', 'true');
+  $('materialBody').innerHTML = '';
+  materialItem = null;
+  clearMaterialSnapshot();
+  if (materialCaptureStream) materialCaptureStream.getTracks().forEach(track => track.stop());
+  materialCaptureStream = null;
+  materialCaptureVideo = null;
+}
+
+function clearMaterialSnapshot() {
+  materialSnapshotData = '';
+  materialCaptureCanvas = null;
+  $('materialSnapshot').classList.remove('ready');
+  $('materialSnapshotImage').removeAttribute('src');
+}
+
+async function startMaterialLasso() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    alert('Snapshot capture is not supported by this browser.');
+    return;
+  }
+  try {
+    if (!materialCaptureStream || materialCaptureStream.getVideoTracks()[0]?.readyState !== 'live') {
+      materialCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+        video:{displaySurface:'browser', selfBrowserSurface:'include'}, audio:false
+      });
+      materialCaptureVideo = document.createElement('video');
+      materialCaptureVideo.srcObject = materialCaptureStream;
+      materialCaptureVideo.muted = true;
+      await materialCaptureVideo.play();
+      materialCaptureStream.getVideoTracks()[0].addEventListener('ended', () => {
+        materialCaptureStream = null; materialCaptureVideo = null;
+      });
+    }
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    materialCaptureCanvas = document.createElement('canvas');
+    materialCaptureCanvas.width = materialCaptureVideo.videoWidth;
+    materialCaptureCanvas.height = materialCaptureVideo.videoHeight;
+    materialCaptureCanvas.getContext('2d').drawImage(materialCaptureVideo, 0, 0);
+  } catch (e) {
+    reportInterfaceFailure('material snapshot', e);
+    if (e.name !== 'NotAllowedError') alert('Could not capture the material: ' + e.message);
+    return;
+  }
+  $('lassoLayer').classList.add('active');
+  $('lassoLayer').setAttribute('aria-hidden', 'false');
+}
+
+function cancelMaterialLasso() {
+  $('lassoLayer').classList.remove('active');
+  $('lassoLayer').setAttribute('aria-hidden', 'true');
+  $('lassoSelection').style.display = 'none';
+  materialCaptureCanvas = null;
+}
+
+let lassoStart = null;
+$('lassoLayer').addEventListener('pointerdown', ev => {
+  const bounds = $('materialBody').getBoundingClientRect();
+  if (ev.clientX < bounds.left || ev.clientX > bounds.right || ev.clientY < bounds.top || ev.clientY > bounds.bottom) return;
+  lassoStart = {x:ev.clientX, y:ev.clientY, bounds};
+  $('lassoLayer').setPointerCapture(ev.pointerId);
+  $('lassoSelection').style.display = 'block';
+});
+$('lassoLayer').addEventListener('pointermove', ev => {
+  if (!lassoStart) return;
+  const x = Math.max(lassoStart.bounds.left, Math.min(ev.clientX, lassoStart.bounds.right));
+  const y = Math.max(lassoStart.bounds.top, Math.min(ev.clientY, lassoStart.bounds.bottom));
+  Object.assign($('lassoSelection').style, {left:Math.min(x,lassoStart.x)+'px', top:Math.min(y,lassoStart.y)+'px', width:Math.abs(x-lassoStart.x)+'px', height:Math.abs(y-lassoStart.y)+'px'});
+});
+$('lassoLayer').addEventListener('pointerup', ev => {
+  if (!lassoStart || !materialCaptureCanvas) return cancelMaterialLasso();
+  const x2 = Math.max(lassoStart.bounds.left, Math.min(ev.clientX, lassoStart.bounds.right));
+  const y2 = Math.max(lassoStart.bounds.top, Math.min(ev.clientY, lassoStart.bounds.bottom));
+  const left = Math.min(x2, lassoStart.x), top = Math.min(y2, lassoStart.y);
+  const width = Math.abs(x2-lassoStart.x), height = Math.abs(y2-lassoStart.y);
+  lassoStart = null;
+  if (width < 24 || height < 24) return cancelMaterialLasso();
+  const scaleX = materialCaptureCanvas.width / window.innerWidth;
+  const scaleY = materialCaptureCanvas.height / window.innerHeight;
+  const sourceWidth = Math.round(width * scaleX), sourceHeight = Math.round(height * scaleY);
+  const shrink = Math.min(1, 1600 / Math.max(sourceWidth, sourceHeight));
+  const crop = document.createElement('canvas');
+  crop.width = Math.round(sourceWidth * shrink); crop.height = Math.round(sourceHeight * shrink);
+  crop.getContext('2d').drawImage(materialCaptureCanvas, Math.round(left*scaleX), Math.round(top*scaleY), sourceWidth, sourceHeight, 0, 0, crop.width, crop.height);
+  materialSnapshotData = crop.toDataURL('image/jpeg', .82);
+  $('materialSnapshotImage').src = materialSnapshotData;
+  $('materialSnapshot').classList.add('ready');
+  cancelMaterialLasso();
+  $('materialChatQuestion').focus();
+});
+$('materialLasso').onclick = startMaterialLasso;
+$('materialSnapshotRemove').onclick = clearMaterialSnapshot;
+$('notesTab').onclick = () => switchStudyPane('notes');
+$('fridayTab').onclick = () => switchStudyPane('friday');
+$('notesEditor').addEventListener('input', scheduleMaterialNoteSave);
+$('notePreview').onclick = () => {
+  const showing = !$('notesPreview').hidden;
+  $('notesPreview').hidden = showing;
+  $('notesEditor').hidden = !showing;
+  $('notePreview').textContent = showing ? 'Preview' : 'Edit';
+  if (!showing) {
+    $('notesPreview').innerHTML = `<article class="materialMessage assistant">${mdToHtml($('notesEditor').value || '*Nothing written yet.*')}</article>`;
+    renderNeuralMath();
+  } else $('notesEditor').focus();
+};
+$('notePage').onclick = () => {
+  const value = prompt('Page number to reference:', '1');
+  const page = Number.parseInt(value, 10);
+  if (!Number.isFinite(page) || page < 1) return;
+  const editor = $('notesEditor');
+  const marker = `[Page ${page}]`;
+  editor.setRangeText(marker, editor.selectionStart, editor.selectionEnd, 'end');
+  scheduleMaterialNoteSave();
+  editor.focus();
+};
+$('notesSearch').addEventListener('input', () => {
+  clearTimeout(notesSearchTimer);
+  notesSearchTimer = setTimeout(async () => {
+    const query = $('notesSearch').value.trim();
+    if (query.length < 2) { $('notesSearchResults').innerHTML = ''; return; }
+    try {
+      const result = await api(`/api/notes?q=${encodeURIComponent(query)}`);
+      $('notesSearchResults').innerHTML = (result.items || []).map(note => {
+        const excerpt = (note.markdown || '').replace(/\s+/g, ' ').slice(0, 110);
+        return `<button type="button" class="noteSearchHit" data-note-path="${esc(note.rel_path)}">${esc(note.rel_path || 'Untitled material')}<small>${esc(excerpt)}</small></button>`;
+      }).join('') || '<div class="driveIndex">No matching notes</div>';
+    } catch (e) { $('notesSearchResults').innerHTML = `<div class="driveIndex err">${esc(e.message)}</div>`; }
+  }, 300);
+});
+$('notesSearchResults').addEventListener('click', ev => {
+  const hit = ev.target.closest('[data-note-path]');
+  if (!hit) return;
+  closeMaterial();
+  $('driveSearch').value = hit.dataset.notePath;
+  $('notesSearchResults').innerHTML = '';
+  searchDrive();
+});
+
+$('materialChatForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  if (!materialItem) return;
+  const question = $('materialChatQuestion').value.trim();
+  if (!question) return;
+  $('materialChatQuestion').value = '';
+  $('materialChatAsk').disabled = true;
+  $('materialChatLog').insertAdjacentHTML('beforeend', `<article class="materialMessage user"><div class="materialMessageLabel">You</div><div>${esc(question)}</div></article><div class="scanning" id="materialChatBusy" style="margin-top:18px">FRIDAY is reading the displayed material…</div>`);
+  scrollMaterialChat();
+  try {
+    const result = await api('/api/drive/learn', {id:materialItem.id, session:MATERIAL_CHAT_SESSION, question, snapshot:materialSnapshotData});
+    $('materialChatBusy').remove();
+    $('materialChatLog').insertAdjacentHTML('beforeend', `<article class="materialMessage assistant"><div class="materialMessageLabel">FRIDAY</div>${mdToHtml(result.answer || '')}<div class="materialMeta">${esc(result.backend || 'AI')} · ${esc(result.model || '')}</div></article>`
+      + (result.snapshot_note ? `<div class="materialChatNotice">${esc(result.snapshot_note)}</div>` : ''));
+    renderNeuralMath();
+    clearMaterialSnapshot();
+  } catch (e) {
+    $('materialChatBusy').remove();
+    $('materialChatLog').insertAdjacentHTML('beforeend', `<div class="materialChatError" style="margin-top:18px">${esc(e.message || 'FRIDAY could not complete the request.')}</div>`);
+  } finally {
+    $('materialChatAsk').disabled = false;
+    scrollMaterialChat();
+    $('materialChatQuestion').focus();
+  }
+});
+
 function renderPlan(s) {
   const c = s.summary || {};
 
@@ -1301,8 +2795,14 @@ $('saveToken').onclick = async () => {
     await refresh();
   } catch (e) { $('authErr').textContent = e.message; }
 };
-$('loadCourses').onclick = async () => {
-  try { await api('/api/courses', {}); await refresh(); } catch (e) { alert(e.message); }
+$('syncAll').onclick = async () => {
+  try {
+    await api('/api/sync', {});
+    await refresh();
+  } catch (e) {
+    $('syncAllState').textContent = e.message;
+    $('syncAllState').className = 'headerSyncState err';
+  }
 };
 $('selectAll').onclick = () => {
   document.querySelectorAll('.cbox').forEach(b => b.checked = true);
@@ -1357,6 +2857,24 @@ $('push').onclick = async () => {
   try { await api('/api/push', {}); await refresh(); }
   catch (e) { alert(e.message); }
 };
+$('driveRefresh').onclick = async () => {
+  try { await api('/api/drive/list', {}); await refresh(); }
+  catch (e) { alert(e.message); }
+};
+document.addEventListener('click', (ev) => {
+  const button = ev.target.closest('[data-fetch]');
+  if (!button || !STATE) return;
+  ev.preventDefault();
+  const item = driveSearchResults.find(f => f.id === button.dataset.fetch);
+  if (item) openMaterial(item);
+});
+$('materialClose').onclick = closeMaterial;
+$('materialShade').onclick = closeMaterial;
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape') return;
+  if ($('lassoLayer').classList.contains('active')) cancelMaterialLasso();
+  else if (document.body.classList.contains('materialOpen')) closeMaterial();
+});
 document.addEventListener('change', (ev) => {
   if (!ev.target.classList.contains('pbox')) return;
   ev.target.checked ? picked.add(ev.target.dataset.path) : picked.delete(ev.target.dataset.path);
@@ -1378,6 +2896,7 @@ async function uploadSchedule(file) {
       (data.exams ? ` and <b>${data.exams}</b> exam(s)` : '') + ' — click to replace';
     await refresh();
   } catch (e) {
+    reportInterfaceFailure('schedule upload', e);
     $('tpErr').textContent = e.message;
     $('tpDropText').innerHTML = 'Upload your STARS <b>Course(s) Registered</b> PDF '
       + '&mdash; or drop it here';
@@ -1398,7 +2917,10 @@ $('tpDrop').addEventListener('drop', (ev) => {
   uploadSchedule(ev.dataTransfer.files[0]);
 });
 
-async function refresh() { render(await api('/api/state')); }
+async function refresh() {
+  try { render(await api('/api/state')); }
+  catch (error) { reportInterfaceFailure('dashboard refresh/render', error); }
+}
 refresh();
 setInterval(refresh, 1200);
 </script>
