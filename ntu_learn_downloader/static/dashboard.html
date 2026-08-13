@@ -141,7 +141,8 @@ header {
 .segs i.off { background: rgba(255,122,112,.35); }
 
 .chips { display: flex; gap: 9px; }
-.headerSync { display:flex; align-items:center; }
+.headerSync { display:flex; align-items:center; gap:8px; min-width:0; }
+.headerSyncState { max-width:280px; font-size:9px; line-height:1.35; overflow-wrap:anywhere; }
 .chip {
   border: 1px solid var(--line); padding: 9px 11px; min-width: 42px;
   text-align: center; line-height: 1.2;
@@ -167,10 +168,10 @@ main {
     "rnd      labs     courses"
     "manifest transcribe drive"
     "system   console  console";
-  grid-template-rows: auto var(--command-row-height, minmax(220px, auto)) auto var(--command-row-height, minmax(220px, auto)) auto auto;
+  grid-template-rows: repeat(6, auto);
   align-content: start;
 }
-@media (min-width: 901px) and (max-width: 1099px) {
+@media (min-width: 901px) and (max-width: 1100px) {
   main { grid-template-columns: minmax(0, 1fr) minmax(340px, .72fr);
          padding: 18px; gap: 16px;
          grid-template-areas:
@@ -181,8 +182,8 @@ main {
            "rnd       labs"
            "courses   manifest"
            "transcribe drive"
-           "system    console"
-         grid-template-rows: auto 360px auto auto 230px auto auto auto; }
+           "system    console";
+         grid-template-rows: repeat(8, auto); }
 }
 @media (max-width: 900px) {
   /* No "top right" in one column, so the calendar takes the nearest equivalent:
@@ -208,42 +209,43 @@ main {
 #rndPanel      { grid-area: rnd; align-self: start; min-width: 0; }
 #consolePanel  { grid-area: console; align-self: start; }
 
-@media (min-width: 1100px) {
-  /* Inbound and neural queries occupy exactly the row established by the fully
-     expanded Temporal Protocol panel; Drive Pull follows all three. */
-  #todoPanel, #inboundPanel, #temporalPanel, #labsPanel, #rndPanel, #coursePanel {
-    height: 100%; box-sizing: border-box;
+/* Preserve the original compact HUD composition on large displays. At smaller
+   desktop widths panels grow naturally, avoiding the resize collisions that the
+   synchronized tracks caused near the responsive breakpoint. */
+@media (min-width: 1280px) {
+  main {
+    grid-template-rows: auto var(--command-row-height, 400px) auto var(--command-row-height, 400px) auto auto;
   }
-  #todoPanel, #inboundPanel, #temporalPanel { min-height:0; max-height:var(--command-row-height); }
-  #rndPanel, #labsPanel, #coursePanel { min-height:0; max-height:var(--command-row-height); overflow-y:auto; overflow-x:hidden; }
-  #temporalPanel { overflow-y:auto; overflow-x:hidden; }
+  #todoPanel, #inboundPanel, #temporalPanel, #labsPanel, #rndPanel, #coursePanel {
+    height:100%; min-height:0; box-sizing:border-box;
+    max-height:var(--command-row-height);
+  }
+  #rndPanel, #labsPanel, #coursePanel, #temporalPanel {
+    overflow-y:auto; overflow-x:hidden;
+  }
   #todoPanel > h2, #inboundPanel > h2, #temporalPanel > h2,
   #rndPanel > h2, #labsPanel > h2, #coursePanel > h2 {
     position:sticky; top:-14px; z-index:3; margin-left:-1px; margin-right:-1px;
     padding-top:14px; background:#07131d;
   }
-  #inboundPanel { overflow:hidden; display:flex; flex-direction:column; }
-  #todoPanel { overflow: hidden; display:flex; flex-direction:column; }
-  /* The scroller is the <details> itself, not the list inside it: Chrome slots a
-     details' content into an anonymous box, so flex:1 on .todoList never reaches
-     the flex line and the list sizes to content — overrunning the composer. */
+  #inboundPanel, #todoPanel { overflow:hidden; display:flex; flex-direction:column; }
   #todoPanel .todoDrop { flex:1 1 0; min-height:0; overflow-y:auto; }
   #todoPanel .todoDrop:not([open]) { flex:0 0 auto; overflow:visible; }
   #todoPanel .todoDrop > summary { position:sticky; top:0; z-index:2; background:var(--panel); }
   #todoPanel .todoList { height:auto; overflow:visible; }
   #inboundPanel #inboundList { flex:1 1 auto; min-height:0; max-height:none; }
   #rndPanel #rndList { max-height:78px; }
-  #temporalPanel { height:100%; min-height:0; box-sizing:border-box; overflow-y:auto; overflow-x:hidden; contain:layout paint; }
   #manifestPanel, #transcribePanel, #drivePanel, #systemPanel, #consolePanel {
     height:100%; min-height:0; box-sizing:border-box;
   }
   #consolePanel { overflow:hidden; display:flex; flex-direction:column; }
   #consolePanel .log { flex:1 1 auto; min-height:0; max-height:none; }
 }
-@media (min-width: 901px) and (max-width: 1099px) {
+@media (min-width: 901px) and (max-width: 1100px) {
   main.linked #temporalPanel { grid-column: 1 / -1; }
   #todoPanel, #inboundPanel, #labsPanel, #rndPanel, #coursePanel {
-    height: 100%; box-sizing: border-box; overflow-y: auto; overflow-x: hidden;
+    height:auto; max-height:none; box-sizing:border-box;
+    overflow-y:visible; overflow-x:hidden;
   }
 }
 
@@ -862,7 +864,7 @@ code { color: var(--cyan); }
   </div>
 
   <div class="chips">
-    <div class="headerSync"><button class="primary" id="syncAll" type="button" title="Sync announcements, inbound mail, and course nodes">Sync</button><span id="syncAllState" hidden></span></div>
+    <div class="headerSync"><button class="primary" id="syncAll" type="button" title="Sync announcements, inbound mail, and course nodes">Sync</button><span id="syncAllState"></span></div>
     <div class="chip"><span class="k">Link</span><span class="v" id="linkState">—</span></div>
     <div class="chip"><span class="k">Scope</span><span class="v" id="scopeState">—</span></div>
     <div class="chip"><span class="k">Nodes</span><span class="v" id="courseCount">0</span></div>
@@ -905,7 +907,7 @@ code { color: var(--cyan); }
   <div class="row" style="margin-bottom:12px">
     <button id="selectAll">All</button>
     <button class="primary" id="scan">Scan</button>
-    <span class="muted" id="scanState"></span>
+    <span id="scanState" hidden></span>
   </div>
   <div id="courses"></div>
 </section>
@@ -1132,14 +1134,11 @@ const picked = new Set();
 const trPicked = new Set();
 let sigPriority = null;
 
-// At desktop width the unbounded content in Inbound and Active Neural Queries must
-// not participate in sizing their shared grid track. Temporal Protocol is deliberately
-// fully expanded, so its intrinsic height is the authoritative row height.
 let commandRowFrame = 0;
 function syncCommandRowHeight() {
   cancelAnimationFrame(commandRowFrame);
   commandRowFrame = requestAnimationFrame(() => {
-    if (matchMedia('(min-width: 1100px)').matches) {
+    if (matchMedia('(min-width: 1280px)').matches) {
       const temporal = $('temporalPanel');
       dashboardMain.style.setProperty('--command-row-height',
         Math.min(400, Math.max(340, temporal.scrollHeight)).toFixed(2) + 'px');
@@ -1266,10 +1265,17 @@ function render(s) {
   $('courseCount').textContent = s.courses.length;
   $('queueCount').textContent = picked.size;
   const unified = s.unified_sync || {};
+  const syncErrors = [unified.error, (s.inbound || {}).error,
+    ...(((s.announcements || {}).errors) || [])].filter(Boolean);
+  const courseLinkFailed = !!s.has_token && !s.courses.length
+    && syncErrors.some(message => /course nodes|session token|401|expired/i.test(message));
+  const syncMessage = unified.syncing ? 'Announcements · inbound · nodes'
+    : [...new Set(syncErrors)].join(' · ');
   $('syncAll').disabled = !!unified.syncing || !s.has_token;
   $('syncAll').textContent = unified.syncing ? 'Syncing…' : 'Sync';
-  $('syncAllState').textContent = unified.syncing ? 'Announcements · inbound · nodes' : (unified.error || '');
-  $('syncAllState').className = 'headerSyncState ' + (unified.error ? 'err' : unified.syncing ? 'scanning' : 'muted');
+  $('syncAllState').textContent = syncMessage;
+  $('syncAllState').hidden = !syncMessage;
+  $('syncAllState').className = 'headerSyncState ' + (syncErrors.length ? 'err' : unified.syncing ? 'scanning' : 'muted');
 
   // ── footer telemetry ─────────────────────────────────────────────────────
   $('rootLabel').textContent = tail(s.download_root, 30);
@@ -1283,7 +1289,8 @@ function render(s) {
   $('footStatus').textContent = 'iNTUition / ' + (busy || 'system operational');
   $('strip').textContent = busy ? busy + '…' : 'standing by';
 
-  $('authSection').style.display = s.has_token ? 'none' : '';
+  $('authSection').style.display = s.has_token && !courseLinkFailed ? 'none' : '';
+  if (courseLinkFailed) $('authErr').textContent = 'The saved NTU Learn session was rejected. Paste a fresh BbRouter cookie, then Sync again.';
   dashboardMain.classList.toggle('linked', !!s.has_token);
   $('scanState').textContent = s.scanning ? 'scanning' : '';
   $('scanState').className = s.scanning ? 'scanning' : 'muted';
@@ -2792,16 +2799,28 @@ $('saveToken').onclick = async () => {
   try {
     await api('/api/token', {token: $('token').value});
     $('token').value = '';
+    // A fresh token leaves the previous session's failures latched in state, and
+    // courseLinkFailed reads exactly those — so refreshing alone would redisplay
+    // "session was rejected" over a token that is in fact good. Starting a sync
+    // clears the stale errors server-side and is what fills in the course nodes.
+    $('syncAllState').hidden = false;
+    $('syncAllState').textContent = 'Linking…';
+    $('syncAllState').className = 'headerSyncState scanning';
+    try { await api('/api/sync', {}); } catch (_) { /* surfaced via state */ }
     await refresh();
   } catch (e) { $('authErr').textContent = e.message; }
 };
 $('syncAll').onclick = async () => {
+  $('syncAllState').hidden = false;
+  $('syncAllState').textContent = 'Starting sync…';
+  $('syncAllState').className = 'headerSyncState scanning';
   try {
     await api('/api/sync', {});
     await refresh();
   } catch (e) {
     $('syncAllState').textContent = e.message;
     $('syncAllState').className = 'headerSyncState err';
+    $('syncAllState').hidden = false;
   }
 };
 $('selectAll').onclick = () => {

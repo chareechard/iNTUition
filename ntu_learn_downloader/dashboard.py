@@ -1209,6 +1209,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with state.lock:
                 state.token = token
+                # Every one of these describes the *previous* session. Left latched,
+                # a 401 from an expired token keeps the UI reporting that the link
+                # was rejected however many good tokens are pasted after it.
+                state.unified_sync_error = ""
+                state.announcement_errors = []
+                state.inbound_error = ""
+                state.scan_errors = []
             threading.Thread(target=state.refresh_identity, daemon=True).start()
             state.note("Session token accepted")
             self._send({"ok": True})
