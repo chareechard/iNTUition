@@ -16,7 +16,8 @@ import json
 import mimetypes
 import os
 import tempfile
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +25,7 @@ from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 from ntu_learn_downloader import auth
+from ntu_learn_downloader import build_info
 from ntu_learn_downloader import api as api_mod
 from ntu_learn_downloader import rest as rest_mod
 from ntu_learn_downloader import semester as semester_mod
@@ -37,9 +39,8 @@ from ntu_learn_downloader import drive
 from ntu_learn_downloader import transcribe as transcribe_mod
 from ntu_learn_downloader.contentcache import ContentCache
 from ntu_learn_downloader.ledger import Ledger
-from ntu_learn_downloader import rnd as rnd_mod
+from ntu_learn_downloader import summary as summary_mod
 from ntu_learn_downloader import research as research_mod
-from ntu_learn_downloader import materials as materials_mod
 from ntu_learn_downloader import inbound as inbound_mod
 from ntu_learn_downloader import triage_store as triage_store_mod
 from ntu_learn_downloader import triage as triage_mod
@@ -47,20 +48,43 @@ from ntu_learn_downloader import triage_run as triage_run_mod
 from ntu_learn_downloader import academic_calendar as cal_mod
 from ntu_learn_downloader import schedule as schedule_mod
 from ntu_learn_downloader import todo as todo_mod
-from ntu_learn_downloader import labs as labs_mod
 from ntu_learn_downloader import announcements as announcements_mod
 from ntu_learn_downloader import ai_provider
+from ntu_learn_downloader import graphing as graphing_mod
 from ntu_learn_downloader import omniroute_provider
+from ntu_learn_downloader import lab as lab_mod
+from ntu_learn_downloader import lab_analysis as lab_analysis_mod
 from ntu_learn_downloader.chat_memory import ChatMemory
-from ntu_learn_downloader.notes import Notebook, NoteConflict
-from ntu_learn_downloader.sync import DOWNLOADABLE, PUSHABLE, build_plan, summarize
+from ntu_learn_downloader.notes import Notebook, NoteConflict, html_to_text
+from ntu_learn_downloader.sync import (
+    DOWNLOADABLE, PUSHABLE, build_plan, recover_restructured, summarize)
 from ntu_learn_downloader.utils import bounded_filename, download, get_filename_from_url
 
 DEFAULT_PORT = 8384
 DEFAULT_HOST = "127.0.0.1"
+# Compendium's summaries table and its .tex/.pdf files on disk both grow
+# monotonically - see notes.py, which keeps even failed runs by design - so a quiet
+# startup sweep is the only thing that ever reclaims that growth short of the user
+# deleting summaries by hand. 0 (or negative) disables the sweep entirely.
+SUMMARY_RETENTION_DAYS_DEFAULT = 60
 ANNOUNCEMENT_SYNC_HOURS = (7, 23)
 INBOUND_POLL_SECONDS = 12 * 60 * 60
 DRIVE_LEARNING_SYSTEM = """You are FRIDAY, a careful university learning assistant. Answer from the supplied course material. Explain concepts clearly and distinguish what the material states from your own explanation. If the material does not support the answer, say so instead of inventing details. Default to a focused answer under 450 words with at most one worked example; expand only when the student explicitly requests depth. Compare the concepts the student actually names and correct a misleading premise tactfully. Allowed output is explanatory Markdown with headings, lists, compact tables, short quotations, code blocks, equations, worked examples, summaries, flashcards, and revision questions. Use blank lines around headings, quotations, lists, tables, and display equations. Write inline mathematics as \\( ... \\) and display mathematics as \\[ ... \\]; do not use dollar-sign delimiters. Never claim to modify files, submit coursework, browse private systems, or execute actions; you only return learning content."""
+
+# Deliberately narrow: this reads a page for graphable functions, nothing else.
+# The response is untrusted input that ntu_learn_downloader.graphing validates
+# against a closed allowlist before it ever reaches GeoGebra's evalCommand, but
+# a tighter prompt means less for that validator to have to reject.
+GRAPH_SYSTEM = """You read a screenshot of one page from a student's course material and report ONLY the explicit mathematical function(s) it defines, so they can be graphed automatically. Respond with strict JSON and nothing else - no prose, no markdown fences, no explanation. Schema: {"functions": [{"expr": "<algebraic expression in x, or in x and y>", "vars": ["x"] or ["x","y"]}], "domain": [<min>,<max>], "range": [<min>,<max>]}. Use "vars":["x"] for a single-variable function f(x) and "vars":["x","y"] for a surface f(x,y). "expr" must be plain algebra using only digits, x, y, + - * / ^ ( ) , . and the named functions sin cos tan asin acos atan sinh cosh tanh sqrt exp ln log abs floor ceil pi e - never GeoGebra commands, scripting, or any other identifier. Read "domain" and "range" from any interval explicitly stated on the page (for example "for x in [-2,2]"); omit them if none is stated. If the page names no explicit function to graph, respond exactly {"functions": []}. Never invent a function the page does not state."""
+GRAPH_PROMPT = "Read the attached page and report any explicit function(s) to graph, per your instructions."
+
+# lab_analysis.py validates every field below before it reaches the page - a
+# tighter prompt just means less for that validator to have to reject. The
+# "steps" field is this app's own addition to the brief's contract: an
+# "initialState" alone can only paint one static picture, not drive the
+# Simulation tab's Play/Step/Speed timeline, so the model additionally
+# mentally traces its own execution into a short operation log.
+LAB_BLUEPRINT_SYSTEM = """You are FRIDAY, reading one source file open in a student's local Python/Java IDE. Identify the primary algorithm it implements and respond with strict JSON only - no prose, no markdown fences, no explanation. Schema: {"detectedAlgorithm": "<name, e.g. Dijkstra's Shortest Path, QuickSort, Bubble Sort, Binary Search - or \\"Not identified\\" if the file implements no recognizable algorithm>", "paradigm": "<e.g. Greedy, Divide and Conquer, Dynamic Programming, Brute Force, Backtracking - or \\"Unknown\\">", "timeComplexity": "<Big-O in terms of the code's own variable names, e.g. O(N log N) - or \\"Unknown\\">", "spaceComplexity": "<Big-O - or \\"Unknown\\">", "criticalLines": [{"line": <1-based line number from the numbered source below>, "purpose": "<short explanation of that line's operational importance>"}] (at most 8, only the lines that matter most - never invent a line number outside the file), "simulationModel": {"type": "\\"array\\", \\"graph\\", \\"tree\\" or \\"none\\"", "initialState": <for "array": the JSON array of starting values the code operates on; for "graph"/"tree": {"nodes": [...], "edges": [{"from":..., "to":..., "weight":...}]}; use null with type "none" if nothing in the file has a structure worth animating>}, "steps": [<at most 60 steps tracing the algorithm's own execution against simulationModel.initialState, each either {"op":"compare","indices":[i,j],"line":<n>}, {"op":"swap","indices":[i,j],"line":<n>}, {"op":"set","indices":[i],"value":<v>,"line":<n>}, {"op":"visit","node":"<id>","line":<n>}, or {"op":"edge","from":"<id>","to":"<id>","weight":<w>,"line":<n>} - omit "steps" entirely (or leave it empty) if simulationModel.type is "none" or you cannot trace real execution>]}. Base every field only on what the code in front of you actually does; never invent an algorithm, complexity, or step the code does not support."""
 OMNIROUTE_WATCH_SECONDS = 15
 
 TODO_BACKENDS = ("auto", research_mod.BACKEND_OMNIROUTE, research_mod.BACKEND_CLI)
@@ -133,6 +157,12 @@ class State:
         self.transcribing = False
         self.transcribe_progress = {"done": 0, "total": 0, "current": "", "pct": 0}
         self._transcriber = None
+        # One Compendium generation at a time, like transcribing/pushing - a 60-120s
+        # job with its own worker thread. summary_job holds the single most recent
+        # job's live status; the job id lets a poll from a stale tab notice it is
+        # looking at an older run rather than silently showing the wrong one.
+        self.summarizing = False
+        self.summary_job: Optional[Dict] = None
         self.media_survey: List[Dict] = []
         self.identity: Optional[Dict] = None
         self.drive_folder = drive_folder
@@ -155,14 +185,14 @@ class State:
         self.ledger = Ledger(download_root)
         self.cache = ContentCache(download_root)
         self.schedule = schedule_mod.Schedule(download_root)
-        self.rnd = rnd_mod.Board(download_root)
         self.todo = todo_mod.Queue(download_root)
         self.todo_researching: set = set()
         self.todo_research_errors: Dict[str, str] = {}
-        self.labs = labs_mod.LabBoard(download_root)
         self.announcements = announcements_mod.Feed(download_root)
         self.chat_memory = ChatMemory(download_root)
         self.notebook = Notebook(download_root)
+        self.lab_workspace = lab_mod.Workspace(download_root)
+        self.lab_jobs = lab_mod.JobManager()
         self.announcements_syncing = False
         self.unified_syncing = False
         self.unified_sync_error = ""
@@ -170,15 +200,10 @@ class State:
         self.announcements_summarizing = False
         self.announcement_summary_error = ""
         self.announcement_schedule_error = ""
-        # Ids currently out at the Claude backend, and the last error per id. Research
-        # is per-entry and on demand, so several can be in flight at once.
-        self.researching: set = set()
-        self.research_errors: Dict[str, str] = {}
         # None = pick whatever is usable, preferring the CLI's own login over a key.
+        # Still read by todo research, the materials chat, and the Drive learning
+        # chat - the R&D board was one consumer among several, not the owner of this.
         self.research_backend: Optional[str] = None
-        # The one setting that sends course content off the machine. On by request;
-        # the panel toggles it and every finding records what was actually shared.
-        self.research_materials = True
         # An explicit flag store to read. When unset, the reader falls back to
         # this project's own triage.db beneath the sync folder.
         self.inbound_db: Optional[str] = inbound_db
@@ -187,6 +212,34 @@ class State:
         # Which academic calendar to resolve teaching weeks against.
         self.semester_key = semester_mod.format_semester(
             semester_mod.current_semester())
+
+    def rebind_root(self, download_root: str):
+        """Point every root-anchored store at a new download folder.
+
+        The ledger, cache and the various boards each opened a file under the old
+        root when this State was built. Reassigning ``download_root`` alone left them
+        reading the old location while plans were keyed to the new one - so every
+        archived file looked new and the whole course was downloaded again.
+
+        Takes ``self.lock`` itself; do not call it while already holding the lock.
+        """
+        root = os.path.abspath(download_root)
+        with self.lock:
+            if root == self.download_root:
+                return
+            self.download_root = root
+            self.ledger = Ledger(root)
+            self.cache = ContentCache(root)
+            self.schedule = schedule_mod.Schedule(root)
+            self.todo = todo_mod.Queue(root)
+            self.announcements = announcements_mod.Feed(root)
+            self.chat_memory = ChatMemory(root)
+            self.notebook = Notebook(root)
+            self.lab_workspace = lab_mod.Workspace(root)
+            # The plan describes files under the previous root; it means nothing here.
+            self.plan = []
+            self.media_survey = []
+        self.note("Sync folder set to {}".format(root))
 
     def _schedule_snapshot(self) -> Dict:
         """Everything the Temporal Protocol panel needs, resolved to today."""
@@ -268,6 +321,9 @@ class State:
             _todo_backend, todo_ai_status = todo_ai_choice()
             return {
                 "download_root": self.download_root,
+                # Which copy of the page is this? A frozen build serves the
+                # snapshot it was packaged with, so the footer says so.
+                "build": build_info.summary(),
                 "prefer_rest": self.prefer_rest,
                 "scope": self.scope,
                 "semester": semester_mod.format_semester(
@@ -288,9 +344,17 @@ class State:
                 "pulling": self.pulling,
                 "transcribing": self.transcribing,
                 "transcribe_progress": dict(self.transcribe_progress),
+                "summarizing": self.summarizing,
+                "summary_job": dict(self.summary_job) if self.summary_job else None,
                 "transcribe": {
                     "model": self.transcribe_model,
-                    "media": self.media_survey,
+                    # Local survey plus whatever the already-cached Drive index
+                    # (self.drive_files, refreshed by "Index"/do_drive_list) turns
+                    # out to hold - move mode deletes a video locally once it is
+                    # archived, so that is the only place left to detect it. Pure
+                    # in-memory classification, no extra Drive calls on every poll.
+                    "media": self.media_survey
+                             + transcribe_mod.classify_drive_media(self.drive_files),
                 },
                 "progress": dict(self.progress),
                 "push_progress": dict(self.push_progress),
@@ -305,9 +369,6 @@ class State:
                     "file_count": len(self.drive_files),
                 },
                 "schedule": self._schedule_snapshot(),
-                "labs": self.labs.snapshot(
-                    self.schedule.sessions,
-                    cal_mod.week_of(datetime.now().date(), self.semester_key)),
                 "announcements": dict(self.announcements.snapshot(),
                                       syncing=self.announcements_syncing,
                                       errors=list(self.announcement_errors),
@@ -318,7 +379,6 @@ class State:
                 "inbound": dict(inbound_mod.snapshot(
                     inbound_mod.resolve_path(self.download_root, self.inbound_db)),
                     syncing=self.inbound_syncing, error=self.inbound_error),
-                "rnd": self.rnd.snapshot(),
                 "todo": dict(self.todo.snapshot(),
                              busy=sorted(self.todo_researching),
                              errors=dict(self.todo_research_errors),
@@ -328,17 +388,6 @@ class State:
                                             for backend, options
                                             in todo_model_options().items()},
                              backends=list(TODO_BACKENDS)),
-                "research": dict(
-                    ai_status,
-                    busy=sorted(self.researching),
-                    errors=dict(self.research_errors),
-                    materials=self.research_materials,
-                    material_caps={"files": materials_mod.MAX_FILES,
-                                   "mb": materials_mod.MAX_TOTAL_BYTES // 1048576},
-                    sandbox=os.path.join(self.download_root,
-                                         research_mod.STORAGE_DIR,
-                                         research_mod.SANDBOX_DIRNAME),
-                ),
                 "log": list(self.log[-40:]),
             }
 
@@ -378,6 +427,16 @@ def do_scan(state: State, course_ids: List[str]):
             for entry in entries:
                 entry["course"] = course["name"]
             combined.extend(entries)
+
+        # Across every scanned course, so a record cannot be claimed twice. Only
+        # matters for archives predating resource ids; normally a no-op.
+        recovered = recover_restructured(combined, state.ledger, state.download_root)
+        if recovered:
+            state.ledger.save()
+            state.note(
+                "Recovered {} archived file(s) that moved to a new folder in Learn "
+                "- not re-downloading them".format(len(recovered))
+            )
 
         with state.lock:
             state.plan = combined
@@ -478,7 +537,8 @@ def run_scheduled_announcement_sync(state: State):
     if not state.courses:
         try:
             courses = get_courses(
-                state.token, prefer_rest=state.prefer_rest, scope=state.scope)
+                state.token, prefer_rest=state.prefer_rest, scope=state.scope,
+                download_root=state.download_root)
         except Exception as exc:  # noqa: BLE001
             state.note("Scheduled announcement sync could not load courses: {}".format(exc))
             return
@@ -500,8 +560,16 @@ def run_scheduled_announcement_sync(state: State):
 
 
 def announcement_sync_scheduler(state: State):
-    """Run announcement synchronization at the start and end of every local day."""
+    """Poll announcements on startup, then at the start and end of every local day.
+
+    This thread only runs while the app is open, so without the startup sync a
+    post made while it was closed sits unsynced until the next 07:00/23:00
+    window fires *after* the app happens to be running - up to 16h late, or a
+    whole window missed if it's closed again by then. Mirrors
+    inbound_poll_scheduler's startup poll for mail.
+    """
     waiter = threading.Event()
+    run_scheduled_announcement_sync(state)
     while True:
         waiter.wait(seconds_until_next_announcement_sync())
         run_scheduled_announcement_sync(state)
@@ -653,8 +721,248 @@ def do_transcribe(state: State, paths: List[str] = None):
             state.transcribe_progress["current"] = ""
 
 
-def course_codes(state: State) -> List[str]:
-    """Course codes from the scanned course list, e.g. 26S1-SC2002-... -> SC2002.
+def do_transcribe_drive(state: State, drive_ids: List[str] = None):
+    """Generate transcripts for media that only exists in Drive: pull each one to a
+    throwaway temp copy, transcribe it, upload the result beside it, then delete the
+    temp copy. Mirrors transcribe_run.backfill(), but drives progress through the
+    dashboard's state the same way do_transcribe() does for local media.
+
+    This is the only transcription path the dashboard needs for a move-mode setup,
+    where nothing sticks around locally long enough for do_transcribe() to reach it.
+    """
+    try:
+        try:
+            service = drive.build_service()
+        except drive.DriveError as e:
+            state.note("Drive unavailable: {}".format(e))
+            return
+
+        mirror = drive.DriveMirror(service, root_folder=state.drive_folder)
+        listed = mirror.list_files()
+        with state.lock:
+            state.drive_files = listed
+
+        wanted = set(drive_ids or [])
+        media = [
+            e for e in transcribe_mod.classify_drive_media(listed)
+            if e["status"] != transcribe_mod.PROVIDED
+            and (not wanted or e["drive_id"] in wanted)
+        ]
+        with state.lock:
+            state.transcribe_progress = {
+                "done": 0, "total": len(media), "current": "", "pct": 0
+            }
+        if not media:
+            state.note("No untranscribed media found in Drive")
+            return
+
+        if state._transcriber is None:
+            state.note("Loading Whisper {} (first run downloads the model)".format(
+                state.transcribe_model))
+            state._transcriber = transcribe_mod.Transcriber(state.transcribe_model)
+
+        from googleapiclient.http import MediaIoBaseDownload
+
+        ok = failed = 0
+        with tempfile.TemporaryDirectory(prefix="intuition_transcribe_") as tmp:
+            for entry in media:
+                with state.lock:
+                    state.transcribe_progress["current"] = entry["rel_path"]
+                    state.transcribe_progress["pct"] = 0
+                local = os.path.join(tmp, entry["name"])
+                try:
+                    with open(local, "wb") as fh:
+                        downloader = MediaIoBaseDownload(
+                            fh, service.files().get_media(
+                                fileId=entry["drive_id"], supportsAllDrives=True),
+                            chunksize=8 * 1024 * 1024)
+                        done = False
+                        while not done:
+                            _status, done = downloader.next_chunk()
+
+                    def on_progress(frac, _text, _entry=entry):
+                        with state.lock:
+                            state.transcribe_progress["pct"] = round(frac * 100)
+
+                    written = state._transcriber.transcribe(local, progress=on_progress)
+                    parent_id = mirror.ensure_path(
+                        [p for p in os.path.dirname(entry["rel_path"]).split("/") if p])
+                    for kind in ("vtt", "txt"):
+                        mirror.upload(written[kind], parent_id)
+                    state.note("Backfilled {}".format(entry["rel_path"]))
+                    ok += 1
+                except Exception as e:  # noqa: BLE001 - one bad file must not end the run
+                    state.note("Backfill failed {}: {}".format(entry["rel_path"], e))
+                    failed += 1
+                finally:
+                    # Reclaim the temp copy immediately; these are large.
+                    for p in (local,) + tuple(
+                            transcribe_mod.transcript_paths(local).values()):
+                        if os.path.exists(p):
+                            os.remove(p)
+                    with state.lock:
+                        state.transcribe_progress["done"] += 1
+
+        state.note("Drive transcription complete: {} done, {} failed".format(ok, failed))
+    finally:
+        with state.lock:
+            state.transcribing = False
+            state.transcribe_progress["current"] = ""
+
+
+def do_generate_summary(state: State, job_id: str, item_id: str, prompt: str,
+                        scope: str, include_notes: bool, session_id: str):
+    """Compendium worker thread: build_order step 5. Pulls the material fresh into
+    a throwaway temp copy (the same pattern /api/drive/learn already uses), hands it
+    to summary.generate(), then files the result - PDF and .tex beside the course's
+    other material, a row in the notes database, either way, success or failure.
+    """
+    def set_stage(text: str):
+        with state.lock:
+            if state.summary_job and state.summary_job["id"] == job_id:
+                state.summary_job["stage"] = text
+
+    material_name = item_id
+    try:
+        with state.lock:
+            item = next((dict(entry) for entry in state.drive_files
+                        if entry["id"] == item_id), None)
+        if not item:
+            raise summary_mod.SummaryError(
+                "material is not in the current Drive index")
+
+        material_name = item.get("rel_path") or item.get("name") or item_id
+        # Storage stays beside the material, under its actual top-level folder.
+        # Sibling matching is different: materials.select() matches its course
+        # argument as a short code (SC2005) against folder names, not the folder
+        # name itself - the raw top segment (e.g. "26S1-SC2005-OPERATING SYSTEMS")
+        # would only self-match that exact folder, missing siblings filed under any
+        # differently-worded variant of the same course.
+        top_folder = (item.get("rel_path") or "").split("/", 1)[0]
+        codes = course_codes_in(top_folder)
+        course_code = codes[0] if codes else top_folder
+
+        note_text = ""
+        chat_turns: List[Dict] = []
+        if include_notes:
+            note = state.notebook.get(item_id)
+            # The editor stores rich HTML now, not markdown source - the prompt
+            # wants the student's words, not their tag soup.
+            note_text = html_to_text((note or {}).get("markdown", ""))
+            chat_turns = state.chat_memory.recent(
+                session_id, item_id, limit=summary_mod.CHAT_TURNS_LIMIT)
+
+        set_stage("Connecting to Drive")
+        service = drive.build_service(interactive=False)
+
+        with tempfile.TemporaryDirectory(prefix="intuition-compendium-") as tmp:
+            set_stage("Downloading material")
+            material_path = drive.pull_file(service, item, tmp)
+            result = summary_mod.generate(
+                material_path, material_name, prompt, state.download_root,
+                scope=scope, note_text=note_text, chat_turns=chat_turns,
+                course=course_code, ledger=state.ledger, drive_service=service,
+                preferred_backend=state.research_backend, on_stage=set_stage)
+
+        if not result.ok:
+            state.notebook.save_summary(
+                job_id, document_id=item_id, material_name=material_name,
+                prompt=prompt, scope=scope, backend=result.backend or "",
+                model=result.model or "", rung=result.rung or "",
+                page_anchors=result.pages_cited, ok=False,
+                error="; ".join(result.errors)[:2000])
+            with state.lock:
+                state.summary_job.update({
+                    "stage": "Failed", "ok": False, "done": True,
+                    "error_stage": result.stage, "errors": result.errors,
+                    "tex": result.tex,
+                })
+            state.note("Compendium failed for {}: {}".format(
+                material_name, "; ".join(result.errors[:2]) or result.stage))
+            return
+
+        set_stage("Saving")
+        summaries_dir = os.path.join(state.download_root, top_folder, "summaries")
+        os.makedirs(summaries_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        stem = os.path.splitext(os.path.basename(material_name))[0]
+        tex_path = os.path.join(
+            summaries_dir, bounded_filename(summaries_dir, "{}-{}.tex".format(stem, stamp)))
+        pdf_path = os.path.join(
+            summaries_dir, bounded_filename(summaries_dir, "{}-{}.pdf".format(stem, stamp)))
+        with open(tex_path, "w", encoding="utf-8") as f:
+            f.write(result.tex)
+        with open(pdf_path, "wb") as f:
+            f.write(result.pdf)
+
+        state.notebook.save_summary(
+            job_id, document_id=item_id, material_name=material_name,
+            prompt=prompt, scope=scope, backend=result.backend or "",
+            model=result.model or "", rung=result.rung or "",
+            tex_path=tex_path, pdf_path=pdf_path,
+            page_anchors=result.pages_cited, ok=True, error="")
+
+        with state.lock:
+            state.summary_job.update({
+                "stage": "Done", "ok": True, "done": True,
+                "pdf_path": pdf_path, "tex_path": tex_path,
+                "backend": result.backend, "model": result.model, "rung": result.rung,
+                "pages_cited": result.pages_cited,
+            })
+        state.note("Compendium summary saved: {}".format(
+            os.path.relpath(pdf_path, state.download_root)))
+    except Exception as exc:  # noqa: BLE001 - a thread dying silently is worse
+        try:
+            state.notebook.save_summary(
+                job_id, document_id=item_id, material_name=material_name,
+                prompt=prompt, scope=scope, ok=False, error=str(exc)[:2000])
+        except Exception:  # noqa: BLE001 - the job status below is the real record
+            pass
+        with state.lock:
+            if state.summary_job and state.summary_job["id"] == job_id:
+                state.summary_job.update({
+                    "stage": "Failed", "ok": False, "done": True,
+                    "error_stage": "generate", "errors": [str(exc)],
+                })
+        state.note("Compendium failed: {}".format(exc))
+    finally:
+        with state.lock:
+            state.summarizing = False
+
+
+def delete_summary_files(row: Dict) -> None:
+    """Best-effort removal of one summary's .tex/.pdf pair - a file already gone
+    (moved, or a failed run that never wrote one) is not an error here."""
+    for key in ("tex_path", "pdf_path"):
+        path = row.get(key)
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def sweep_old_summaries(state: State, max_age_days: int):
+    """Startup housekeeping: run once, off the request path, so a slow or huge
+    notebook never delays the dashboard binding its port (same reasoning as the
+    Drive listing / identity refresh threads already started from serve()).
+    """
+    if max_age_days <= 0:
+        return
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        removed = state.notebook.delete_summaries_older_than(cutoff)
+        for row in removed:
+            delete_summary_files(row)
+        if removed:
+            state.note("Compendium sweep: removed {} summary(ies) older than {} "
+                      "day(s)".format(len(removed), max_age_days))
+    except Exception as exc:  # noqa: BLE001 - a housekeeping sweep must never crash startup
+        state.note("Compendium sweep failed: {}".format(exc))
+
+
+def course_codes_in(name: str) -> List[str]:
+    """Course codes embedded in one name, e.g. "26S1-SC2002-..." -> ["SC2002"].
 
     The academic year in the verbose form - "AY2026-2027, Semester 1, MH2100
     (Calculus III)" - has the exact shape of a course code and comes first, so it is
@@ -662,69 +970,18 @@ def course_codes(state: State) -> List[str]:
     course called AY2026.
     """
     import re
-    codes = []
+    return [c for c in re.findall(r"[A-Z]{2,4}\d{4}", (name or "").upper())
+            if not c.startswith("AY")]
+
+
+def course_codes(state: State) -> List[str]:
+    """Course codes from the scanned course list, e.g. 26S1-SC2002-... -> SC2002."""
     with state.lock:
         names = [c.get("name", "") for c in state.courses]
+    codes = []
     for name in names:
-        codes += [c for c in re.findall(r"[A-Z]{2,4}\d{4}", name.upper())
-                  if not c.startswith("AY")]
+        codes += course_codes_in(name)
     return sorted(set(codes))
-
-
-def do_research(state: State, item_id: str):
-    """Send one board entry to Claude and store the finding on it.
-
-    Only ever reached from an explicit press of Research on that entry. What is sent is
-    built in research.build_prompt - the entry text plus the enrolled course codes, and
-    nothing from the download folder.
-    """
-    item = state.rnd.get(item_id)
-    title = (item or {}).get("title", item_id)
-    try:
-        if item is None:
-            raise research_mod.ResearchError("That entry no longer exists")
-        # Course material is shared only with sharing on, only for this entry's own
-        # course tag, and only for the length of the run.
-        specs, service = [], None
-        if state.research_materials and item.get("course"):
-            specs = materials_mod.select(item["course"], state.download_root,
-                                         ledger=state.ledger)
-            if any(s["local"] is None for s in specs):
-                service = materials_mod.service_for(state.download_root)
-                if service is None:
-                    specs = [s for s in specs if s["local"]]
-                    state.note("Drive not linked; sharing only local material")
-            if specs:
-                state.note("Sharing {} {} file(s) with this run".format(
-                    len(specs), item["course"]))
-
-        state.note("Researching {}".format(title))
-        finding = research_mod.research(item, courses=course_codes(state),
-                                        backend=state.research_backend,
-                                        download_root=state.download_root,
-                                        material_specs=specs, drive_service=service,
-                                        direction=state.rnd.direction)
-        state.rnd.set_research(item_id, finding)
-        state.rnd.save()
-        with state.lock:
-            state.research_errors.pop(item_id, None)
-        cost = finding.get("cost_usd")
-        shared = finding.get("materials") or []
-        state.note("Research done: {} via {} ({} source(s){}{})".format(
-            title, finding.get("backend", "?"), len(finding["sources"]),
-            ", {} material file(s)".format(len(shared)) if shared else "",
-            ", ${:.4f}".format(cost) if cost else ""))
-    except research_mod.ResearchError as e:
-        with state.lock:
-            state.research_errors[item_id] = str(e)
-        state.note("Research failed for {}: {}".format(title, e))
-    except Exception as e:  # noqa: BLE001 - a thread dying silently is worse
-        with state.lock:
-            state.research_errors[item_id] = str(e)
-        state.note("Research failed for {}: {}".format(title, e))
-    finally:
-        with state.lock:
-            state.researching.discard(item_id)
 
 
 def do_todo_research(state: State, item_id: str, backend: Optional[str],
@@ -763,11 +1020,60 @@ def do_todo_research(state: State, item_id: str, backend: Optional[str],
 def do_push(state: State):
     """Mirror every locally-held plan entry into Drive, then reclaim the disk."""
     try:
+        from ntu_learn_downloader.drive_push import collect_files
+
         with state.lock:
-            targets = [
-                e for e in state.plan
-                if e["status"] in PUSHABLE and os.path.isfile(e["path"])
-            ]
+            targets = []
+            seen_paths = set()
+
+            # 1. Targets from state.plan
+            for e in state.plan:
+                p = e.get("path", "")
+                rel_p = e.get("rel_path", "")
+                real_p = None
+                if p and os.path.isfile(p):
+                    real_p = p
+                elif rel_p and os.path.isfile(os.path.join(state.download_root, rel_p)):
+                    real_p = os.path.join(state.download_root, rel_p)
+
+                if real_p and e.get("status") in PUSHABLE:
+                    norm = os.path.abspath(real_p)
+                    if norm not in seen_paths:
+                        e["path"] = norm
+                        targets.append(e)
+                        seen_paths.add(norm)
+
+            # 2. Add any remaining physical files on disk
+            disk_files = collect_files(state.download_root)
+            for f in disk_files:
+                norm = os.path.abspath(f["path"])
+                if norm not in seen_paths:
+                    matched = None
+                    # collect_files() reports the on-disk relpath (backslash-separated
+                    # on Windows); state.plan carries sync.py's logical, forward-slash
+                    # rel_path. Comparing them raw never matches on Windows, which
+                    # silently orphaned every disk-only push target from its plan
+                    # entry - losing both the status update after push and the
+                    # entry's real (untruncated) logical name.
+                    disk_rel = f["rel_path"].replace("\\", "/")
+                    for e in state.plan:
+                        if (e.get("rel_path") or "").replace("\\", "/") == disk_rel:
+                            e["path"] = norm
+                            e["status"] = "current"
+                            matched = e
+                            break
+                    if matched:
+                        targets.append(matched)
+                    else:
+                        targets.append({
+                            "path": norm,
+                            "rel_path": f["rel_path"],
+                            "status": "current",
+                            "size": f["size"],
+                            "modified": f["modified"],
+                        })
+                    seen_paths.add(norm)
+
             state.push_progress = {
                 "done": 0, "total": len(targets), "current": "", "pct": 0
             }
@@ -782,37 +1088,46 @@ def do_push(state: State):
             state.note("Drive unavailable: {}".format(e))
             return
 
-        mirror = drive.DriveMirror(service, root_folder=state.drive_folder)
-        pushed = failed = 0
+        try:
+            # A scheduled `drive_push` run and this dashboard push must never touch
+            # the same Drive folder at once - Drive's existence check for
+            # create-vs-update is only eventually consistent, and two overlapping
+            # pushes can each miss the other's fresh upload and duplicate it. See
+            # drive.push_lock for the full reasoning.
+            with drive.push_lock():
+                mirror = drive.DriveMirror(service, root_folder=state.drive_folder)
+                pushed = failed = 0
 
-        for entry in targets:
-            with state.lock:
-                state.push_progress["current"] = entry["rel_path"]
-                state.push_progress["pct"] = 0
+                for entry in targets:
+                    with state.lock:
+                        state.push_progress["current"] = entry["rel_path"]
+                        state.push_progress["pct"] = 0
 
-            def on_chunk(fraction):
-                with state.lock:
-                    state.push_progress["pct"] = round(fraction * 100)
+                    def on_chunk(fraction):
+                        with state.lock:
+                            state.push_progress["pct"] = round(fraction * 100)
 
-            try:
-                result = drive.push_file(
-                    mirror, entry, state.download_root, state.ledger,
-                    move=state.move, progress=on_chunk,
-                )
-                entry["status"] = "archived" if state.move else "current"
-                entry["drive_id"] = result["drive_id"]
-                pushed += 1
-                state.note("Drive <- {}".format(entry["rel_path"]))
-            except Exception as e:  # noqa: BLE001 - one bad file must not end the run
-                failed += 1
-                state.note("Push failed {}: {}".format(entry["rel_path"], e))
-            finally:
-                # Persist after each file so an interrupted run keeps its record.
-                state.ledger.save()
-                with state.lock:
-                    state.push_progress["done"] += 1
+                    try:
+                        result = drive.push_file(
+                            mirror, entry, state.download_root, state.ledger,
+                            move=state.move, progress=on_chunk,
+                        )
+                        entry["status"] = "archived" if state.move else "current"
+                        entry["drive_id"] = result["drive_id"]
+                        pushed += 1
+                        state.note("Drive <- {}".format(entry["rel_path"]))
+                    except Exception as e:  # noqa: BLE001 - one bad file must not end the run
+                        failed += 1
+                        state.note("Push failed {}: {}".format(entry["rel_path"], e))
+                    finally:
+                        # Persist after each file so an interrupted run keeps its record.
+                        state.ledger.save()
+                        with state.lock:
+                            state.push_progress["done"] += 1
 
-        state.note("Push complete: {} moved, {} failed".format(pushed, failed))
+                state.note("Push complete: {} moved, {} failed".format(pushed, failed))
+        except drive.PushLockError as e:
+            state.note(str(e))
     finally:
         with state.lock:
             state.pushing = False
@@ -847,14 +1162,45 @@ def do_drive_list(state: State):
 
 def do_drive_pull(state: State, ids: List[str]):
     try:
+        try:
+            service = drive.build_service()
+        except drive.DriveError as e:
+            state.note("Drive unavailable: {}".format(e))
+            return
         with state.lock:
             allowed = {item["id"]: dict(item) for item in state.drive_files}
-        targets = [allowed[item_id] for item_id in ids if item_id in allowed]
+        targets = []
+        for item_id in ids:
+            if item_id in allowed:
+                targets.append(allowed[item_id])
+            else:
+                try:
+                    res = service.files().get(
+                        fileId=item_id,
+                        fields="id,name,mimeType,size,modifiedTime",
+                        supportsAllDrives=True
+                    ).execute()
+                    item = {
+                        "id": res["id"],
+                        "name": res.get("name", item_id),
+                        "rel_path": res.get("name", item_id),
+                        "mime_type": res.get("mimeType") or "application/octet-stream",
+                        "size": int(res.get("size") or 0),
+                        "modified": res.get("modifiedTime"),
+                    }
+                    targets.append(item)
+                    with state.lock:
+                        state.drive_files.append(item)
+                except Exception as exc:  # noqa: BLE001
+                    state.note("Could not resolve metadata for Drive file {}: {}".format(item_id, exc))
+        if not targets:
+            state.note("No valid Drive files resolved for pull")
+            return
         with state.lock:
             state.pull_progress = {"done": 0, "total": len(targets),
                                    "current": "", "pct": 0}
-        service = drive.build_service()
         pulled = failed = 0
+
         for item in targets:
             with state.lock:
                 state.pull_progress.update(current=item["rel_path"], pct=0)
@@ -911,7 +1257,7 @@ def do_unified_sync(state: State):
     try:
         try:
             courses = get_courses(state.token, prefer_rest=state.prefer_rest,
-                                  scope=state.scope)
+                                  scope=state.scope, download_root=state.download_root)
             with state.lock:
                 state.courses = [{"name": name, "id": course_id}
                                  for name, course_id in courses]
@@ -995,11 +1341,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self._do_GET()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass  # client went away mid-response; not a real error
         except Exception as exc:  # noqa: BLE001 - last-resort dashboard telemetry
             self.state.note("GET {} failed: {}".format(self.path, exc))
             try:
                 self._send({"error": str(exc) or "request failed"}, status=500)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
     def _do_GET(self):
@@ -1046,6 +1394,33 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send({"items": self.state.chat_memory.recent(session_id, item_id)})
             return
+        if path == "/api/lab/tree":
+            self._send({"tree": self.state.lab_workspace.tree()})
+            return
+        if path == "/api/lab/output":
+            query = parse_qs(parsed.query)
+            job_id = (query.get("job") or [""])[0]
+            since = (query.get("since") or ["0"])[0]
+            try:
+                seq = int(since)
+            except ValueError:
+                seq = 0
+            result = self.state.lab_jobs.output_since(job_id, seq)
+            if result is None:
+                self._send({"error": "no such job"}, status=404)
+                return
+            self._send(result)
+            return
+        if path == "/api/lab/read":
+            query = parse_qs(parsed.query)
+            rel_path = (query.get("path") or [""])[0]
+            try:
+                content = self.state.lab_workspace.read(rel_path)
+            except lab_mod.WorkspaceError as exc:
+                self._send({"error": str(exc)}, status=404)
+                return
+            self._send({"content": content})
+            return
         if path == "/api/notes":
             query = parse_qs(parsed.query)
             item_id = (query.get("id") or [""])[0]
@@ -1056,6 +1431,81 @@ class Handler(BaseHTTPRequestHandler):
                 self._send({"note": self.state.notebook.get(item_id)})
             else:
                 self._send({"error": "material id or search query is required"}, status=400)
+            return
+        if path == "/api/study/summary":
+            job_id = (parse_qs(parsed.query).get("job") or [""])[0]
+            with self.state.lock:
+                job = dict(self.state.summary_job) if self.state.summary_job else None
+            if not job or job["id"] != job_id:
+                self._send({"error": "no such job (it may have been superseded by "
+                                     "a newer generation)"}, status=404)
+                return
+            self._send({"job": job})
+            return
+        if path == "/api/study/summaries":
+            item_id = (parse_qs(parsed.query).get("id") or [""])[0]
+            if not item_id:
+                self._send({"error": "material id is required"}, status=400)
+                return
+            self._send({"items": self.state.notebook.list_summaries(item_id)})
+            return
+        if path == "/api/study/summary/pdf":
+            job_id = (parse_qs(parsed.query).get("job") or [""])[0]
+            with self.state.lock:
+                job = dict(self.state.summary_job) if self.state.summary_job else None
+            # A job id that isn't the one currently in memory is history - it still
+            # has a real .tex/.pdf on disk, just recorded via the notebook instead
+            # of state.summary_job (which only ever holds the most recent run).
+            if not job or job["id"] != job_id:
+                job = self.state.notebook.get_summary(job_id)
+            if not job or not job.get("ok") or not job.get("pdf_path"):
+                self._send({"error": "no finished PDF for this job"}, status=404)
+                return
+            try:
+                with open(job["pdf_path"], "rb") as f:
+                    body = f.read()
+            except OSError as exc:
+                self._send({"error": str(exc)}, status=500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", "inline")
+            self.send_header("Cache-Control", "private, no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/study/summary/tex":
+            job_id = (parse_qs(parsed.query).get("job") or [""])[0]
+            with self.state.lock:
+                job = dict(self.state.summary_job) if self.state.summary_job else None
+            if not job or job["id"] != job_id:
+                job = self.state.notebook.get_summary(job_id)
+            if not job:
+                self._send({"error": "no such job"}, status=404)
+                return
+            # A finished job's document lives on disk; a failed one only ever had
+            # its text held in memory for exactly this handback - "the user gets
+            # the .tex, the log, and a plain statement of what failed."
+            if job.get("tex_path"):
+                try:
+                    with open(job["tex_path"], "r", encoding="utf-8") as f:
+                        body = f.read().encode("utf-8")
+                except OSError as exc:
+                    self._send({"error": str(exc)}, status=500)
+                    return
+            elif job.get("tex"):
+                body = job["tex"].encode("utf-8")
+            else:
+                self._send({"error": "no .tex available for this job"}, status=404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", "inline")
+            self.send_header("Cache-Control", "private, no-store")
+            self.end_headers()
+            self.wfile.write(body)
             return
         if path == "/api/drive/content":
             item_id = (parse_qs(parsed.query).get("id") or [""])[0]
@@ -1071,7 +1521,12 @@ class Handler(BaseHTTPRequestHandler):
                     target = drive.pull_file(service, item, tmp)
                     with open(target, "rb") as stream:
                         body = stream.read()
-                content_type = mimetypes.guess_type(target)[0]
+                # mimetypes.guess_type doesn't know source-code extensions like .java or
+                # .cpp (returns None), which would otherwise fall through to
+                # application/octet-stream below - Drive already told us the real type
+                # in item["mime_type"] (that's what the frontend used to pick the
+                # <iframe> rendering path in the first place), so trust that first.
+                content_type = mimetypes.guess_type(target)[0] or item.get("mime_type")
                 if item.get("mime_type") in drive.GOOGLE_EXPORTS:
                     content_type = drive.GOOGLE_EXPORTS[item["mime_type"]][0]
                 self.send_response(200)
@@ -1084,16 +1539,29 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001 - report Drive preview failures
                 self._send({"error": str(exc)}, status=500)
             return
+
+        if path == "/api/drive/tree":
+            prefix = (parse_qs(parsed.query).get("path") or [""])[0]
+            with self.state.lock:
+                files = list(self.state.drive_files)
+                listing = self.state.drive_listing
+            level = drive.tree_level(files, prefix)
+            level["listing"] = listing
+            level["file_count"] = len(files)
+            self._send(level)
+            return
         self._send({"error": "not found"}, status=404)
 
     def do_PUT(self):
         try:
             self._do_PUT()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass  # client went away mid-response; not a real error
         except Exception as exc:  # noqa: BLE001 - last-resort dashboard telemetry
             self.state.note("PUT {} failed: {}".format(self.path, exc))
             try:
                 self._send({"error": str(exc) or "request failed"}, status=500)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
     def _do_PUT(self):
@@ -1146,11 +1614,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             self._do_POST()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass  # client went away mid-response; not a real error
         except Exception as exc:  # noqa: BLE001 - no interface failure should be silent
             self.state.note("POST {} failed: {}".format(self.path, exc))
             try:
                 self._send({"error": str(exc) or "request failed"}, status=500)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
     def _do_POST(self):
@@ -1223,11 +1693,87 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/settings":
             with state.lock:
-                if payload.get("download_root"):
-                    state.download_root = payload["download_root"]
+                busy = state.scanning or state.downloading or state.pushing
                 if "prefer_rest" in payload:
                     state.prefer_rest = bool(payload["prefer_rest"])
+            if payload.get("download_root"):
+                # Moving the root mid-run would leave the ledger and the in-flight
+                # plan describing two different folders.
+                if busy:
+                    self._send(
+                        {"error": "cannot change the sync folder while a scan, "
+                                  "download or push is running"}, status=409)
+                    return
+                state.rebind_root(payload["download_root"])
             self._send({"ok": True})
+            return
+
+        if path == "/api/lab/file":
+            action = payload.get("action")
+            rel_path = str(payload.get("path") or "")
+            try:
+                if action == "create":
+                    state.lab_workspace.create(rel_path, str(payload.get("kind") or "file"))
+                elif action == "write":
+                    state.lab_workspace.write(rel_path, payload.get("content", ""))
+                elif action == "delete":
+                    state.lab_workspace.delete(rel_path)
+                elif action == "rename":
+                    state.lab_workspace.rename(rel_path, str(payload.get("newPath") or ""))
+                else:
+                    self._send({"error": "unknown action"}, status=400)
+                    return
+            except lab_mod.WorkspaceError as exc:
+                self._send({"error": str(exc)}, status=400)
+                return
+            self._send({"ok": True, "tree": state.lab_workspace.tree()})
+            return
+
+        if path == "/api/lab/run":
+            rel_path = str(payload.get("path") or "")
+            language = str(payload.get("language") or "")
+            try:
+                job = state.lab_jobs.start(state.lab_workspace, rel_path, language)
+            except lab_mod.WorkspaceError as exc:
+                self._send({"error": str(exc)}, status=400)
+                return
+            self._send({"ok": True, "job": job.id})
+            return
+
+        if path == "/api/lab/kill":
+            ok = state.lab_jobs.kill(str(payload.get("job") or ""))
+            self._send({"ok": ok})
+            return
+
+        if path == "/api/lab/analyze":
+            rel_path = str(payload.get("path") or "")
+            try:
+                content = state.lab_workspace.read(rel_path)
+            except lab_mod.WorkspaceError as exc:
+                self._send({"error": str(exc)}, status=400)
+                return
+            if not content.strip():
+                self._send({"error": "file is empty"}, status=400)
+                return
+            lines = content.splitlines()
+            line_count = len(lines)
+            # Numbered so the model's "line" fields land on the same lines
+            # the editor shows - lab_analysis then refuses anything outside
+            # [1, line_count] regardless of what the model claims.
+            numbered = "\n".join("{}: {}".format(i + 1, line) for i, line in enumerate(lines))
+            prompt = "Source file ({}):\n{}\n---\nReport the JSON blueprint now.".format(
+                rel_path, numbered[:12000])
+            try:
+                result = ai_provider.complete_tier(
+                    "chat", prompt, LAB_BLUEPRINT_SYSTEM, preferred=state.research_backend,
+                    max_tokens=1200, download_root=state.download_root)
+            except ai_provider.ProviderError as exc:
+                self._send({"error": str(exc)}, status=502)
+                return
+            blueprint = lab_analysis_mod.parse_blueprint_response(
+                result.get("text") or "", line_count)
+            self._send({"blueprint": blueprint, "backend": result.get("backend"),
+                        "model": result.get("model")})
             return
 
         if path == "/api/todo":
@@ -1288,6 +1834,46 @@ class Handler(BaseHTTPRequestHandler):
                     if state.todo.set_research(payload.get("id", ""), None) is None:
                         self._send({"error": "no such query"}, status=404)
                         return
+                elif action == "chat":
+                    item_id = str(payload.get("id") or "")
+                    session_id = str(payload.get("session") or "default")[:80]
+                    question = str(payload.get("question") or "").strip()[:2000]
+                    item = state.todo.get(item_id)
+                    if item is None:
+                        self._send({"error": "no such query"}, status=404)
+                        return
+                    if not question:
+                        self._send({"error": "enter a question"}, status=400)
+                        return
+                    chat_key = "todo:" + item_id
+                    try:
+                        history = state.chat_memory.recent(session_id, chat_key, limit=8)
+                        conversation = "\n".join(
+                            "{}: {}".format(turn["role"].title(), turn["content"][:4000])
+                            for turn in history)
+                        finding = item.get("research") or {}
+                        prompt = "Active query: {}".format(item.get("title") or item_id)
+                        if item.get("course"):
+                            prompt += "\nCourse: {}".format(item["course"])
+                        if item.get("details"):
+                            prompt += "\nContext: {}".format(item["details"])
+                        if finding.get("text"):
+                            prompt += "\n\nPrior AI finding on this query:\n{}".format(
+                                finding["text"][:4000])
+                        prompt += "\n\nRecent conversation:\n{}\n\nStudent question: {}".format(
+                            conversation or "(none)", question)
+                        result = ai_provider.complete_tier(
+                            "chat", prompt, TODO_SYSTEM_PROMPT, preferred=state.research_backend,
+                            max_tokens=900, download_root=state.download_root)
+                        answer = result.get("text") or ""
+                        state.chat_memory.add(session_id, chat_key, "user", question)
+                        state.chat_memory.add(session_id, chat_key, "assistant", answer,
+                                              result.get("backend"), result.get("model"))
+                        self._send({"answer": answer, "backend": result.get("backend"),
+                                    "model": result.get("model")})
+                    except ai_provider.ProviderError as exc:
+                        self._send({"error": str(exc)}, status=500)
+                    return
                 else:
                     self._send({"error": "unknown action"}, status=400)
                     return
@@ -1296,25 +1882,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             state.todo.save()
             self._send({"ok": True, "count": len(state.todo)})
-            return
-
-        if path == "/api/labs":
-            action = payload.get("action")
-            try:
-                if action == "toggle":
-                    value = state.labs.toggle(str(payload.get("key") or ""),
-                                              str(payload.get("stage") or ""))
-                    self._send({"ok": True, "completed": value})
-                    return
-                if action == "prepare":
-                    pack = state.labs.prepare(str(payload.get("course") or ""),
-                                              ledger=state.ledger)
-                    state.note("Lab preparation assembled for {}".format(pack["course"]))
-                    self._send({"ok": True, "pack": pack})
-                    return
-                self._send({"error": "unknown action"}, status=400)
-            except ValueError as e:
-                self._send({"error": str(e)}, status=400)
             return
 
         if path == "/api/announcements":
@@ -1391,90 +1958,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"ok": True, "done": changed})
             return
 
-        if path == "/api/rnd":
-            action = payload.get("action")
-            try:
-                if action == "auto":
-                    if research_mod.resolve_backend(state.research_backend) is None:
-                        self._send({"error": "No Claude research backend is available"},
-                                   status=400)
-                        return
-                    course = str(payload.get("course") or "").strip().upper()
-                    if not course:
-                        self._send({"error": "Choose a course for autonomous research"},
-                                   status=400)
-                        return
-                    item = state.rnd.add(
-                        "Autonomous learning-tool scan: {}".format(course),
-                        course=course,
-                        notes=("Independently identify and research the single highest-value "
-                               "small software tool to build for this course. Choose "
-                               "the problem, verify prior art, and specify the smallest useful "
-                               "implementation without asking me follow-up questions."),
-                        status=rnd_mod.RESEARCHING)
-                    state.rnd.save()
-                    with state.lock:
-                        state.researching.add(item["id"])
-                        state.research_errors.pop(item["id"], None)
-                    threading.Thread(target=do_research, args=(state, item["id"]),
-                                     daemon=True).start()
-                    self._send({"ok": True, "researching": item["id"]})
-                    return
-                elif action == "add":
-                    state.rnd.add(payload.get("title", ""),
-                                  course=payload.get("course", ""),
-                                  notes=payload.get("notes", ""),
-                                  link=payload.get("link", ""))
-                elif action == "advance":
-                    state.rnd.advance(payload.get("id", ""))
-                elif action == "update":
-                    state.rnd.update(payload.get("id", ""),
-                                     **{k: payload.get(k) for k in
-                                        ("title", "course", "notes", "link", "status")})
-                elif action == "remove":
-                    state.rnd.remove(payload.get("id", ""))
-                elif action == "research":
-                    item_id = payload.get("id", "")
-                    if state.rnd.get(item_id) is None:
-                        self._send({"error": "no such entry"}, status=404)
-                        return
-                    if research_mod.resolve_backend(state.research_backend) is None:
-                        self._send({"error": "No research backend. Install the Claude "
-                                             "CLI (uses your existing login), or set "
-                                             "an Anthropic API key."}, status=400)
-                        return
-                    with state.lock:
-                        if item_id in state.researching:
-                            self._send({"error": "already researching"}, status=409)
-                            return
-                        state.researching.add(item_id)
-                        state.research_errors.pop(item_id, None)
-                    threading.Thread(target=do_research, args=(state, item_id),
-                                     daemon=True).start()
-                    self._send({"ok": True, "researching": item_id})
-                    return
-                elif action == "direction":
-                    saved = state.rnd.set_direction(payload.get("direction", ""))
-                    state.rnd.save()
-                    state.note("Research direction {}".format(
-                        "cleared" if not saved else "updated"))
-                elif action == "materials":
-                    with state.lock:
-                        state.research_materials = bool(payload.get("on"))
-                    state.note("Course materials sharing {}".format(
-                        "on" if state.research_materials else "off"))
-                elif action == "clear_research":
-                    state.rnd.set_research(payload.get("id", ""), None)
-                else:
-                    self._send({"error": "unknown action"}, status=400)
-                    return
-            except ValueError as e:
-                self._send({"error": str(e)}, status=400)
-                return
-            state.rnd.save()
-            self._send({"ok": True, "count": len(state.rnd)})
-            return
-
         # Pushing operates purely on files already on disk, so it must work even when
         # the iNTUition session has expired. Handle it before the session gate below.
         if path == "/api/schedule":
@@ -1492,6 +1975,81 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(
                 target=do_transcribe, args=(state, payload.get("paths")),
                 daemon=True).start()
+            self._send({"ok": True})
+            return
+
+        if path == "/api/transcribe/drive":
+            if not drive.credentials_present():
+                self._send({"error": drive.SETUP_HELP}, status=400)
+                return
+            raw_ids = payload.get("drive_ids") or []
+            if not isinstance(raw_ids, list) or any(not isinstance(item, str) for item in raw_ids):
+                self._send({"error": "drive_ids must be a list of Drive file IDs"}, status=400)
+                return
+            with state.lock:
+                if state.transcribing:
+                    self._send({"error": "already transcribing"}, status=409)
+                    return
+                state.transcribing = True
+            threading.Thread(
+                target=do_transcribe_drive, args=(state, list(dict.fromkeys(raw_ids))),
+                daemon=True).start()
+            self._send({"ok": True})
+            return
+
+        if path == "/api/study/summary":
+            item_id = str(payload.get("id") or "").strip()
+            prompt = str(payload.get("prompt") or "").strip()
+            scope = str(payload.get("scope") or summary_mod.SCOPE_NOTES)
+            if not item_id or not prompt:
+                self._send({"error": "choose a material and enter a prompt"}, status=400)
+                return
+            if scope not in summary_mod.SCOPES:
+                self._send({"error": "scope must be one of {}".format(
+                    summary_mod.SCOPES)}, status=400)
+                return
+            if not drive.credentials_present():
+                self._send({"error": drive.SETUP_HELP}, status=400)
+                return
+            include_notes = bool(payload.get("include_notes", True))
+            session_id = str(payload.get("session") or "default")[:80]
+            with state.lock:
+                if state.summarizing:
+                    self._send({"error": "a Compendium generation is already running"},
+                               status=409)
+                    return
+                item = next((entry for entry in state.drive_files
+                            if entry["id"] == item_id), None)
+                material_name = (item or {}).get("rel_path") or (item or {}).get("name") or item_id
+                state.summarizing = True
+                job_id = uuid.uuid4().hex[:16]
+                state.summary_job = {
+                    "id": job_id, "document_id": item_id, "material_name": material_name,
+                    "prompt": prompt[:4000], "scope": scope, "stage": "Queued",
+                    "ok": None, "done": False,
+                }
+            threading.Thread(
+                target=do_generate_summary,
+                args=(state, job_id, item_id, prompt, scope, include_notes, session_id),
+                daemon=True).start()
+            self._send({"ok": True, "job": job_id})
+            return
+
+        if path == "/api/study/summary/delete":
+            summary_id = str(payload.get("id") or "").strip()
+            if not summary_id:
+                self._send({"error": "summary id is required"}, status=400)
+                return
+            row = state.notebook.delete_summary(summary_id)
+            if not row:
+                self._send({"error": "no such summary"}, status=404)
+                return
+            delete_summary_files(row)
+            with state.lock:
+                # The job just deleted may still be the one shown as "last result" -
+                # clear it so the UI doesn't keep offering a PDF that no longer exists.
+                if state.summary_job and state.summary_job.get("id") == summary_id:
+                    state.summary_job = None
             self._send({"ok": True})
             return
 
@@ -1534,10 +2092,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send({"error": "no Drive files selected"}, status=400)
                 return
             with state.lock:
-                known = {item["id"] for item in state.drive_files}
-                if any(item_id not in known for item_id in ids):
-                    self._send({"error": "refresh Drive and select listed files"}, status=400)
-                    return
                 if state.pulling:
                     self._send({"error": "already pulling"}, status=409)
                     return
@@ -1545,6 +2099,7 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=do_drive_pull, args=(state, ids), daemon=True).start()
             self._send({"ok": True})
             return
+
 
         if path == "/api/drive/search":
             query = str(payload.get("query") or "").strip()[:200]
@@ -1604,14 +2159,15 @@ class Handler(BaseHTTPRequestHandler):
                     except omniroute_provider.OmniRouteError as vision_exc:
                         state.note("FRIDAY vision unavailable: {}".format(vision_exc))
                         snapshot_note = "Snapshot vision is temporarily unavailable. FRIDAY answered from the document text instead."
-                        result = ai_provider.complete(
+                        result = ai_provider.complete_tier(
+                            "chat",
                             prompt + "\n\nThe selected snapshot could not be decoded by the vision provider. Answer from the extracted material and state briefly if the requested visual detail cannot be verified.",
                             DRIVE_LEARNING_SYSTEM, preferred=state.research_backend,
-                            max_tokens=900, download_root=state.download_root, timeout=180)
+                            max_tokens=900, download_root=state.download_root)
                 else:
-                    result = ai_provider.complete(
-                        prompt, DRIVE_LEARNING_SYSTEM, preferred=state.research_backend,
-                        max_tokens=900, download_root=state.download_root, timeout=180)
+                    result = ai_provider.complete_tier(
+                        "chat", prompt, DRIVE_LEARNING_SYSTEM, preferred=state.research_backend,
+                        max_tokens=900, download_root=state.download_root)
                 answer = result.get("text") or ""
                 state.chat_memory.add(session_id, item_id, "user", question)
                 state.chat_memory.add(session_id, item_id, "assistant", answer,
@@ -1621,6 +2177,34 @@ class Handler(BaseHTTPRequestHandler):
                             "snapshot_note": snapshot_note})
             except Exception as exc:  # noqa: BLE001 - surface material/provider failures
                 self._send({"error": str(exc)}, status=500)
+            return
+
+        if path == "/api/drive/graph":
+            item_id = str(payload.get("id") or "")
+            snapshot = str(payload.get("snapshot") or "")
+            if (not snapshot.startswith("data:image/jpeg;base64,")
+                    or len(snapshot) > 3_000_000):
+                self._send({"error": "snapshot must be a JPEG under 2 MB"}, status=400)
+                return
+            if not item_id:
+                self._send({"error": "open a material first"}, status=400)
+                return
+            with state.lock:
+                item = next((dict(entry) for entry in state.drive_files
+                             if entry["id"] == item_id), None)
+            if not item:
+                self._send({"error": "material is not in the current Drive index"}, status=404)
+                return
+            try:
+                result = omniroute_provider.complete_image(
+                    GRAPH_PROMPT, GRAPH_SYSTEM, snapshot, max_tokens=400, timeout=90)
+            except omniroute_provider.OmniRouteError as exc:
+                self._send({"error": "Graphing needs vision, which is temporarily "
+                                     "unavailable: {}".format(exc)}, status=502)
+                return
+            spec = graphing_mod.parse_graph_response(result.get("text") or "")
+            self._send({"graph": spec, "backend": result.get("backend"),
+                        "model": result.get("model")})
             return
 
         if not state.token:
@@ -1642,7 +2226,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 courses = get_courses(
                     state.token, prefer_rest=state.prefer_rest,
-                    scope=state.scope,
+                    scope=state.scope, download_root=state.download_root,
                 )
             except Exception as e:  # noqa: BLE001
                 self._send({"error": str(e)}, status=500)
@@ -1740,7 +2324,8 @@ def serve(download_root: str, port: int = DEFAULT_PORT, prefer_rest: bool = True
           open_browser: bool = True, drive_folder: str = drive.DEFAULT_ROOT_FOLDER,
           move: bool = True, scope: str = api_mod.SCOPE_SEMESTER,
           transcribe_model: str = transcribe_mod.DEFAULT_MODEL,
-          inbound_db: Optional[str] = None):
+          inbound_db: Optional[str] = None,
+          summary_retention_days: int = SUMMARY_RETENTION_DAYS_DEFAULT):
     Handler.state = State(
         os.path.abspath(download_root), prefer_rest=prefer_rest,
         drive_folder=drive_folder, move=move, scope=scope,
@@ -1757,6 +2342,8 @@ def serve(download_root: str, port: int = DEFAULT_PORT, prefer_rest: bool = True
                      daemon=True).start()
     threading.Thread(target=inbound_poll_scheduler, args=(Handler.state,),
                      daemon=True).start()
+    threading.Thread(target=sweep_old_summaries,
+                     args=(Handler.state, summary_retention_days), daemon=True).start()
     # Drive search should be ready without making the user understand or manually
     # build an index. Only start silently when an existing OAuth token can be reused.
     if drive.credentials_present() and drive.token_present():
@@ -1831,6 +2418,14 @@ def main():
         default=transcribe_mod.DEFAULT_MODEL,
         help="Whisper model for transcripts (default: %(default)s)",
     )
+    parser.add_argument(
+        "--summary_retention_days",
+        type=int,
+        default=SUMMARY_RETENTION_DAYS_DEFAULT,
+        help="Delete Compendium summaries (DB row and .tex/.pdf) older than this "
+             "many days, swept once at startup. 0 disables the sweep (default: "
+             "%(default)s)",
+    )
     args = parser.parse_args()
     serve(
         args.download_to,
@@ -1842,6 +2437,7 @@ def main():
         scope=args.scope,
         transcribe_model=args.transcribe_model,
         inbound_db=args.inbound_db,
+        summary_retention_days=args.summary_retention_days,
     )
 
 

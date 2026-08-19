@@ -3,9 +3,12 @@
     python tools/check_vendored.py          # report drift
     python tools/check_vendored.py --sync   # overwrite copies from the source
 
-The copies exist because those projects run standalone and cannot import this
-package. A copy that drifts is how a security flag gets quietly dropped from one
-caller, so the test suite checks this whenever a sibling is present.
+A copy exists when a project runs standalone and cannot import this package. A
+copy that drifts is how a security flag gets quietly dropped from one caller, so
+the test suite checks this whenever a sibling is present.
+
+``VENDOR_TARGETS`` is currently empty - every caller imports the source directly -
+so this reports nothing until a target is added back.
 """
 import io
 import os
@@ -14,7 +17,7 @@ import sys
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOURCE = os.path.join(HERE, "ntu_learn_downloader", "claude_bridge.py")
 HEADER = ("# VENDORED COPY - do not edit here.\n"
-          "# Source: NTULearn-Downloader/ntu_learn_downloader/claude_bridge.py\n"
+          "# Source: iNTUition/ntu_learn_downloader/claude_bridge.py\n"
           "# Edit the source, then re-run its tools/check_vendored.py to sync.\n")
 
 
@@ -52,6 +55,10 @@ if __name__ == "__main__":
         print("absent (skipped): {}".format(p))
     for p in drifted:
         print("DRIFTED: {}".format(p))
-    print("synced" if "--sync" in sys.argv else
-          ("drift found" if drifted else "vendored copies match"))
+    from ntu_learn_downloader import claude_bridge
+    if not claude_bridge.VENDOR_TARGETS:
+        print("no vendored copies declared")
+    else:
+        print("synced" if "--sync" in sys.argv else
+              ("drift found" if drifted else "vendored copies match"))
     sys.exit(1 if drifted and "--sync" not in sys.argv else 0)

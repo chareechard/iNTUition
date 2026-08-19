@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import unicodedata
+import hashlib
 import urllib.parse
 from pathlib import Path
 from typing import Optional, Tuple, Callable
@@ -10,6 +11,12 @@ from typing import Optional, Tuple, Callable
 import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+
+# (connect, read) seconds shared by every non-streaming Learn request. Without a
+# bound, a slow or lossy path to Learn leaves the request hanging indefinitely - the
+# dashboard's "Establish Link"/"Sync" never resolves and looks identical to a
+# rejected session, when the real cause is network latency.
+REQUEST_TIMEOUT = (10, 30)
 
 
 def is_download_link(url):
@@ -75,7 +82,9 @@ def make_GET_request(BbRouter, path, params=None):
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    return requests.get(path, headers=headers, cookies=cookies, params=params)
+    return requests.get(
+        path, headers=headers, cookies=cookies, params=params, timeout=REQUEST_TIMEOUT
+    )
 
 
 def is_rest_download_link(url: str) -> bool:
@@ -138,6 +147,84 @@ def sanitise_filename(value):
     value = re.sub(r"[^\.()\w\s-]", "", value)
     value = value.strip("-_")
     return value
+
+
+def bounded_filename(directory: str, value: str, max_path: int = 240) -> str:
+    """Make a safe filename whose absolute destination stays below MAX_PATH.
+
+    A short hash preserves uniqueness when a deeply nested Learn folder forces us
+    to truncate otherwise distinct attachment names.
+    """
+    name = sanitise_filename(value)
+    available = max_path - len(os.path.abspath(directory)) - 1
+    if len(name) <= available:
+        return name
+
+    stem, extension = os.path.splitext(name)
+    suffix = "-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:8] + extension
+    stem_length = available - len(suffix)
+    if stem_length < 1:
+        raise OSError("Download folder path is too long: {}".format(directory))
+    return stem[:stem_length].rstrip(" .-_") + suffix
+
+
+# Longest absolute folder path shorten_path_for_disk will create. Leaves room under
+# Windows' 260-char MAX_PATH for the filename itself, which bounded_filename trims
+# separately - mirrors sync.py's MAX_FOLDER_PATH, which applies the same rule when
+# files are first pulled off Blackboard.
+MAX_FOLDER_PATH = 185
+_FOLDER_SEGMENT_KEEP = 24
+
+
+def _segment_hash(logical_rel: str) -> str:
+    """Short stable digest of a logical path, used to keep shortened branches distinct."""
+    return hashlib.sha256(logical_rel.encode("utf-8")).hexdigest()[:8]
+
+
+def shorten_path_for_disk(root: str, rel_path: str, max_folder_path: int = MAX_FOLDER_PATH) -> str:
+    """Map a logical, unbounded rel_path onto an absolute on-disk path that stays
+    under Windows' MAX_PATH.
+
+    A Drive-mirrored path carries no length limit of its own, so a deeply nested
+    course archive (a folder-per-year exam bank, six levels of repeated titles) can
+    trivially exceed 260 characters once rejoined under a local download root. Any
+    folder segment that would blow the budget is shortened to a truncated prefix
+    plus a hash of the logical path so far - "-" not "~", which sanitise_filename
+    strips - so two differently named branches that happen to truncate to the same
+    prefix land in distinct directories instead of colliding. If even the shortened
+    name does not fit, the segment is dropped and its children land in the parent
+    instead; the final filename then carries the hash instead, so files from
+    distinct dropped branches sharing that parent still cannot overwrite each other.
+    Deterministic: the same rel_path always shortens to the same disk path, so a
+    later pull of the same file lands exactly where an earlier one did.
+    """
+    segments = [s for s in rel_path.replace("\\", "/").split("/") if s]
+    if not segments:
+        raise ValueError("empty rel_path")
+    current = os.path.abspath(root)
+    logical = ""
+    faithful = True
+    for segment in segments[:-1]:
+        segment = sanitise_filename(segment)
+        logical = "/".join(p for p in (logical, segment) if p)
+        candidate = os.path.join(current, segment)
+        if len(os.path.abspath(candidate)) <= max_folder_path:
+            current = candidate
+            continue
+        short = "{}-{}".format(
+            segment[:_FOLDER_SEGMENT_KEEP].rstrip(" .-_"), _segment_hash(logical))
+        shortened = os.path.join(current, short)
+        if len(os.path.abspath(shortened)) <= max_folder_path:
+            current = shortened
+        else:
+            faithful = False
+
+    filename = sanitise_filename(segments[-1])
+    logical = "/".join(p for p in (logical, filename) if p)
+    if not faithful:
+        stem, extension = os.path.splitext(filename)
+        filename = "{}-{}{}".format(stem.rstrip(" .-_"), _segment_hash(logical), extension)
+    return os.path.join(current, bounded_filename(current, filename))
 
 
 def download(

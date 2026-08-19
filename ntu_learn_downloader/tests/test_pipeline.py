@@ -65,7 +65,7 @@ class TestPipeline(unittest.TestCase):
     def test_scan_download_push_rescan(self):
         with TemporaryDirectory() as root:
             ledger = Ledger(root)
-            mirror = drive.DriveMirror(FakeService(), root_folder="NTULearn")
+            mirror = drive.DriveMirror(FakeService(), root_folder="iNTUition")
 
             # 1. First scan: everything is new.
             plan = sync.build_plan(course_tree(), root, ledger=ledger)
@@ -102,7 +102,7 @@ class TestPipeline(unittest.TestCase):
     def test_upstream_edit_after_archiving_is_picked_up(self):
         with TemporaryDirectory() as root:
             ledger = Ledger(root)
-            mirror = drive.DriveMirror(FakeService(), root_folder="NTULearn")
+            mirror = drive.DriveMirror(FakeService(), root_folder="iNTUition")
 
             plan = sync.build_plan(course_tree(), root, ledger=ledger)
             fake_download(plan)
@@ -124,7 +124,7 @@ class TestPipeline(unittest.TestCase):
         with TemporaryDirectory() as root:
             ledger = Ledger(root)
             service = FakeService()
-            mirror = drive.DriveMirror(service, root_folder="NTULearn")
+            mirror = drive.DriveMirror(service, root_folder="iNTUition")
 
             plan = sync.build_plan(course_tree(), root, ledger=ledger)
             fake_download(plan)
@@ -137,7 +137,7 @@ class TestPipeline(unittest.TestCase):
                        if f["mimeType"] == drive.FOLDER_MIME}
             self.assertEqual(
                 folders,
-                {"NTULearn", COURSE, "Tutorial Materials", "Tutorial 1",
+                {"iNTUition", COURSE, "Tutorial Materials", "Tutorial 1",
                  "Important Information"},
             )
 

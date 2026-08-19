@@ -74,7 +74,7 @@ class TestAPI(unittest.TestCase):
         from 19S2-CE2003-DIGITAL SYSTEMS DESIGN / Content / Tutorials / Tutorial solutions / Tut1_CE2003_soln
         """
         # Point at the mock server: this previously made a live request to production
-        # NTULearn, which no longer issues the redirect the assertion depends on.
+        # iNTUition, which no longer issues the redirect the assertion depends on.
         expected_url = "http://localhost:8082/bbcswebdav/pid-1875202-dt-content-rid-9478989_1/courses/19S2-CE2003-LEC/Tut1_CE2003_soln.pdf"
         link = "http://localhost:8082/bbcswebdav/pid-1875202-dt-content-rid-9478989_1/xid-9478989_1"
         with patch.dict("ntu_learn_downloader.api.__dict__", MOCK_CONSTANTS):

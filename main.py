@@ -21,7 +21,7 @@ from ntu_learn_downloader.utils import (
     dummy_file_exists
 )
 
-parser = argparse.ArgumentParser(description="CLI wrapper to NTULearn Downloader")
+parser = argparse.ArgumentParser(description="CLI wrapper to iNTUition")
 
 # Authentication
 parser.add_argument(
@@ -208,7 +208,7 @@ if __name__ == "__main__":
 
     if args.username or args.password:
         print(
-            "-username/-password are no longer supported: NTULearn authenticates "
+            "-username/-password are no longer supported: iNTUition authenticates "
             "through Microsoft Entra ID with MFA, which cannot be scripted.\n"
         )
 

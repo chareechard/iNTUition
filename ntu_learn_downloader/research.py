@@ -1,4 +1,4 @@
-"""Claude backend for the R&D board: research one entry, on request.
+"""Claude research backend, shared by the dashboard's AI-backed features.
 
 Two backends, same finding shape:
 
@@ -13,15 +13,16 @@ The only part of iNTUition that talks to an AI backend, and the only part that s
 anything anywhere other than ntulearn.ntu.edu.sg and Google Drive. The limits that
 remain:
 
-* **Never automatic.** Research runs when you press Research on a specific entry.
-  Nothing is sent on a scan, a poll, or a page load.
-* **Course material only when you ask for it, and only the entry's own course.** With
-  materials sharing on, a capped selection of readable files for the entry's course tag
-  is staged into the sandbox for the length of one run, and the finding records exactly
-  which files those were. With it off, only the entry text and your course codes are
-  sent. See ``materials`` for how the selection is made and bounded.
+* **Never automatic.** A run happens only when a caller explicitly asks
+  ``research()`` for a finding on one item. Nothing is sent on a scan, a poll, or a
+  page load.
+* **Course material only when a caller opts in, and only that item's own course.**
+  With materials sharing on, a capped selection of readable files for the item's
+  course tag is staged into the sandbox for the length of one run, and the finding
+  records exactly which files those were. With it off, only the item text and course
+  codes are sent. See ``materials`` for how the selection is made and bounded.
 
-The Anthropic SDK is an optional dependency (``pip install "ntu-learn-downloader[research]"``)
+The Anthropic SDK is an optional dependency (``pip install "iNTUition[research]"``)
 and the key is read from ``ANTHROPIC_API_KEY`` or ``~/.ntu_learn_downloader/anthropic_key``,
 never from the repository.
 """
@@ -46,12 +47,13 @@ MAX_SEARCHES = 6
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".ntu_learn_downloader")
 KEY_FILENAME = "anthropic_key"
-STORAGE_DIR = ".ntu_learn_downloader"   # matches rnd/ledger, inside the download root
+STORAGE_DIR = ".ntu_learn_downloader"   # matches ledger/todo, inside the download root
 
 # ── CLI backend ──────────────────────────────────────────────────────────────
 BACKEND_CLI = "cli"
 BACKEND_API = "api"
-BACKENDS = (BACKEND_CLI, BACKEND_API)
+BACKEND_OMNIROUTE = "omniroute"
+BACKENDS = (BACKEND_OMNIROUTE, BACKEND_CLI, BACKEND_API)
 
 CLI_BINARY = os.environ.get("INTUITION_CLAUDE_BIN", "claude")
 # The CLI takes an alias and resolves it to the current model itself, so this keeps
@@ -212,6 +214,9 @@ def available() -> bool:
 def status(preferred: Optional[str] = None) -> Dict:
     """Everything the UI needs to say whether research will work, and via what."""
     backend = resolve_backend(preferred)
+    if backend == BACKEND_OMNIROUTE:
+        from ntu_learn_downloader import omniroute_provider
+        return omniroute_provider.status()
     return {
         "backend": backend,
         "ready": backend is not None,
@@ -258,7 +263,7 @@ def _read_cli_version() -> Optional[str]:
         return None
     try:
         out = subprocess.run([CLI_BINARY, "--version"], capture_output=True, text=True,
-                             timeout=20)
+                             timeout=20, creationflags=claude_bridge.no_window())
     except (OSError, subprocess.SubprocessError):
         return None
     # "2.1.225 (Claude Code)" -> "2.1.225"; the UI already says which CLI this is.
@@ -283,8 +288,7 @@ def build_cli_command(prompt: str, model: str = CLI_MODEL, web: bool = True,
     """Assemble the research invocation.
 
     The isolation flags themselves live in ``claude_bridge`` - shared with the
-    Cerberus email triage, which needs the same guarantees against text it did not
-    write. This function only decides the research-specific parts: which tools the
+    email triage, which needs the same guarantees against text it did not write. This function only decides the research-specific parts: which tools the
     task needs, and the researcher system prompt in place of the coding-agent one.
     """
     tools = []
@@ -319,7 +323,7 @@ def research_via_cli(item: Dict, courses: Optional[List[str]] = None,
                      download_root: str = ".", model: str = CLI_MODEL,
                      web: bool = True, max_usd: float = CLI_MAX_USD,
                      runner=None, material_specs: Optional[List[Dict]] = None,
-                     drive_service=None) -> Dict:
+                     drive_service=None, direction: Optional[str] = None) -> Dict:
     if not cli_present():
         raise ResearchError(
             "The Claude CLI ({}) is not on PATH. Install Claude Code, or switch the "
@@ -333,14 +337,14 @@ def research_via_cli(item: Dict, courses: Optional[List[str]] = None,
         staged = materials.stage(material_specs, cwd, service=drive_service)
 
     try:
-        prompt = build_prompt(item, courses, materials=staged)
+        prompt = build_prompt(item, courses, materials=staged, direction=direction)
         cmd = build_cli_command(prompt, model=model, web=web, max_usd=max_usd,
                                 read_materials=bool(staged))
 
         run = runner or subprocess.run
         try:
             proc = run(cmd, capture_output=True, text=True, cwd=cwd,
-                       timeout=CLI_TIMEOUT)
+                       timeout=CLI_TIMEOUT, creationflags=claude_bridge.no_window())
         except subprocess.TimeoutExpired:
             raise ResearchError("The CLI did not finish within {}s.".format(CLI_TIMEOUT))
         except OSError as e:
@@ -405,11 +409,8 @@ def _cli_model(data: Dict, requested: str) -> str:
     return claude_bridge.served_model(data, requested)
 
 
-def resolve_backend(preferred: Optional[str] = None) -> Optional[str]:
-    """Explicit choice, then the environment, then whatever is actually usable."""
-    choice = (preferred or os.environ.get("INTUITION_RESEARCH_BACKEND") or "").strip()
-    if choice in BACKENDS:
-        return choice
+def resolve_claude_backend() -> Optional[str]:
+    """Return the legacy direct provider, used as OmniRoute's fallback."""
     if cli_present():
         return BACKEND_CLI
     if sdk_present() and configured():
@@ -417,12 +418,29 @@ def resolve_backend(preferred: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def resolve_backend(preferred: Optional[str] = None) -> Optional[str]:
+    """Explicit choice, then the environment, then whatever is actually usable."""
+    choice = (preferred or os.environ.get("INTUITION_RESEARCH_BACKEND") or "").strip()
+    if choice in BACKENDS:
+        return choice
+    from ntu_learn_downloader import omniroute_provider
+    if omniroute_provider.status()["ready"]:
+        return BACKEND_OMNIROUTE
+    return resolve_claude_backend()
+
+
 def build_prompt(item: Dict, courses: Optional[List[str]] = None,
-                 materials: Optional[List[Dict]] = None) -> str:
+                 materials: Optional[List[Dict]] = None,
+                 direction: Optional[str] = None) -> str:
     """The entire payload that leaves the machine, assembled in one readable place.
 
     ``materials`` names the files staged for this run - the contents reach the model
     only if it chooses to read them, and only from the sandbox.
+
+    ``direction`` is the board's standing steer, typed by the user. Unlike an email
+    body or a fetched page, this is text the user wrote for this purpose, so it is
+    an instruction rather than evidence - and it is stated as a preference, not a
+    hard constraint, so a genuinely better answer outside it can still come back.
     """
     lines = ["Research this board entry.", "",
              "Entry: {}".format(item.get("title", "").strip())]
@@ -432,6 +450,12 @@ def build_prompt(item: Dict, courses: Optional[List[str]] = None,
         lines.append("My notes: {}".format(item["notes"]))
     if item.get("link"):
         lines.append("Link I found: {}".format(item["link"]))
+    steer = (direction or "").strip()
+    if steer:
+        lines += ["", "The direction I want research to take, in general:", steer,
+                  "Weigh this when choosing what to pursue and what to recommend. "
+                  "If the best answer for this entry falls outside it, say so and "
+                  "give it anyway."]
     if courses:
         lines += ["", "Courses I am taking this semester: {}".format(
             ", ".join(sorted(set(courses))))]
@@ -477,7 +501,7 @@ def research(item: Dict, courses: Optional[List[str]] = None,
              web: bool = True, client=None, backend: Optional[str] = None,
              download_root: str = ".", runner=None,
              material_specs: Optional[List[Dict]] = None,
-             drive_service=None) -> Dict:
+             drive_service=None, direction: Optional[str] = None) -> Dict:
     """Research one entry and return the finding. Raises ResearchError, never blocks.
 
     Routes to whichever backend is available unless one is named. Passing ``client``
@@ -497,7 +521,26 @@ def research(item: Dict, courses: Optional[List[str]] = None,
         return research_via_cli(item, courses=courses, download_root=download_root,
                                 model=model or CLI_MODEL, web=web, runner=runner,
                                 material_specs=material_specs,
-                                drive_service=drive_service)
+                                drive_service=drive_service, direction=direction)
+
+    if chosen == BACKEND_OMNIROUTE:
+        from ntu_learn_downloader import omniroute_provider
+        try:
+            result = omniroute_provider.complete(
+                build_prompt(item, courses, direction=direction), SYSTEM_PROMPT,
+                MAX_TOKENS)
+        except omniroute_provider.OmniRouteError as exc:
+            fallback = resolve_claude_backend()
+            if backend == BACKEND_OMNIROUTE or fallback is None:
+                raise ResearchError(str(exc))
+            return research(item, courses=courses, model=model, key=key, web=web,
+                            client=client, backend=fallback,
+                            download_root=download_root, runner=runner,
+                            material_specs=material_specs,
+                            drive_service=drive_service, direction=direction)
+        result.update({"materials": [], "sources": [],
+                       "at": datetime.now().isoformat(timespec="seconds")})
+        return result
 
     model = model or MODEL
     if client is None:
@@ -529,7 +572,8 @@ def research(item: Dict, courses: Optional[List[str]] = None,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
         thinking={"type": "adaptive"},
-        messages=[{"role": "user", "content": build_prompt(item, courses)}],
+        messages=[{"role": "user",
+                   "content": build_prompt(item, courses, direction=direction)}],
     )
     if tools:
         kwargs["tools"] = tools

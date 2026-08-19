@@ -1,8 +1,8 @@
-```
 # Custom
 .vscode/
 venv
 temp
+tmp/
 data.json
 data.json.bak
 
@@ -15,10 +15,13 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+# PyInstaller writes to the repo root. The canonical run (packaging/build-desktop.ps1)
+# uses build/ and dist/, but one-off runs pass --workpath/--distpath with a suffix
+# (build-notes/, dist-fixed/, ...), so ignore the whole root-anchored family.
 .Python
-build/
+/build*/
+/dist*/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
@@ -40,6 +43,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!packaging/*.spec
 
 # Installer logs
 pip-log.txt
@@ -58,6 +62,11 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.test-tmp/
+.desktop-fix-test-*/
+# pytest --basetemp=test droppings. The real suite lives in ntu_learn_downloader/tests/,
+# so this root-anchored entry cannot swallow it.
+/test/
 
 # Translations
 *.mo
@@ -94,9 +103,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-```
-
-# NTULearn Downloader local state
+# iNTUition local state
 # Staging folder for downloaded course material, plus the Drive ledger and content
 # cache that live inside it. Machine-specific and contains Drive file ids.
 NTU/
@@ -104,7 +111,20 @@ NTU/
 drive_ledger.json
 content_cache.json
 
-# Personal documents dropped in the repo root for one-off imports. The STARS
-# registration PDF carries your name and enrolments; parse it, don't publish it.
-Course(s) Registered*.pdf
-*.webp
+# Personal documents and scratch images dropped in the repo root for one-off imports.
+# The STARS registration PDF carries your name and enrolments; parse it, don't publish
+# it. Anchored to the root so shipped assets under packaging/ and static/ stay tracked.
+/Course(s) Registered*.pdf
+/*.webp
+/*.jfif
+
+# A separate tool with its own upstream (chareechard/claude-context-bar), vendored here
+# only for local use. Nothing in this package imports it; it keeps its own history.
+/claude-context-bar/
+
+# Local dashboard launch traces
+.dashboard-start.*.log
+
+# Scratch workspace for ad-hoc debugging scripts/screenshots - pw-profile alone is a
+# full Playwright/Chrome profile (cookies, autofill, web data), never something to commit.
+.claude-scratch/

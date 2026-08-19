@@ -17,7 +17,7 @@ def parse_recorded_lecture_contents(html: str) -> str:
         raise ValueError(
             'Unable to get mp4 download link: the page is not an AcuStudio player. '
             'AcuStudio has been decommissioned at NTU and recorded lectures are no '
-            'longer downloadable through NTULearn.'
+            'longer downloadable through iNTUition.'
         )
     gsUserId, gsModuleId = m1.groups()[0], m2.groups()[0]
     domain = m3.groups()[0]
@@ -71,7 +71,7 @@ def parse_content_page(soup) -> List[Union[SDoc, SFolder, SLecture]]:
         elif is_file(c, img):
             hyperlink = c.find("a")
             # sometimes file link is broken, in that case no href tag is rendered
-            # see: https://github.com/leafgecko/NTULearn-Downloader/issues/8
+            # Legacy Blackboard pages can render a file row without a usable link.
             if hyperlink is None:
                 continue
             name = hyperlink.text

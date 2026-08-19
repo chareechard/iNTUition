@@ -33,7 +33,7 @@ class AuthenticationError(Exception):
 
 
 HOW_TO_GET_TOKEN = """\
-NTULearn now authenticates through Microsoft Entra ID with MFA, which cannot be
+iNTUition now authenticates through Microsoft Entra ID with MFA, which cannot be
 scripted. To get a session token:
 
   1. Open {url} in your browser and log in as usual.
@@ -95,6 +95,12 @@ def validate(BbRouter: str) -> str:
     if not BbRouter or not BbRouter.strip():
         raise AuthenticationError("No BbRouter token supplied.\n\n" + HOW_TO_GET_TOKEN)
     BbRouter = BbRouter.strip().strip('"').strip("'")
+    # Copying from the Network tab's Cookie header (or from document.cookie) yields
+    # the pair, not the bare value.  Left alone it parses into a bogus leading field
+    # and rides along into the Cookie header, so the token is silently useless.
+    if BbRouter.lower().startswith("bbrouter="):
+        BbRouter = BbRouter[len("bbrouter="):].strip()
+    BbRouter = BbRouter.rstrip(";").strip()
     if not is_authenticated(BbRouter):
         raise AuthenticationError(
             "BbRouter has no 'user' field, it is an anonymous session token.\n\n"
@@ -150,7 +156,14 @@ def resolve(
     if BbRouter:
         token = validate(BbRouter)
         if use_cache:
-            save_token(token, token_path)
+            # Caching is a convenience, not part of authentication.  A packaged or
+            # sandboxed dashboard may be allowed to serve its download directory but
+            # not write beneath the user's home directory.  Keep the valid token in
+            # the live session instead of aborting the HTTP request in that case.
+            try:
+                save_token(token, token_path)
+            except OSError:
+                pass
         return token
 
     if use_cache:

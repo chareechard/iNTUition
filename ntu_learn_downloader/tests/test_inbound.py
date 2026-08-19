@@ -30,16 +30,16 @@ def row(email_id="e1", priority="High", status="open", flagged_at="2026-08-01",
 
 class TestInbound(unittest.TestCase):
     def setUp(self):
-        self._env = os.environ.pop("INTUITION_CERBERUS_DB", None)
+        self._env = os.environ.pop(inbound.ENV_VAR, None)
         inbound._CACHE.clear()
 
     def tearDown(self):
         # Restore, or remove if it was never set - leaving it behind leaks into every
         # later test, since resolve_path consults it before the local store.
         if self._env is not None:
-            os.environ["INTUITION_CERBERUS_DB"] = self._env
+            os.environ[inbound.ENV_VAR] = self._env
         else:
-            os.environ.pop("INTUITION_CERBERUS_DB", None)
+            os.environ.pop(inbound.ENV_VAR, None)
         inbound._CACHE.clear()
 
     def test_absent_database_is_not_an_error(self):
@@ -62,6 +62,32 @@ class TestInbound(unittest.TestCase):
             self.assertEqual([f["id"] for f in inbound.open_flags(db)],
                              ["old-crit", "new-med"])
 
+    def test_newest_first_within_a_priority(self):
+        with TemporaryDirectory() as d:
+            db = os.path.join(d, "f.db")
+            make_db(db, [row("older", flagged_at="2026-08-01"),
+                         row("newer", flagged_at="2026-08-09")])
+            self.assertEqual([f["id"] for f in inbound.open_flags(db)],
+                             ["newer", "older"])
+
+    def test_snapshot_groups_repeated_subjects_without_losing_ids(self):
+        with TemporaryDirectory() as d:
+            db = os.path.join(d, "f.db")
+            make_db(db, [row("a", subject="GIC applications open"),
+                         row("b", subject="GIC applications open")])
+            snap = inbound.snapshot(db, ttl=0)
+            self.assertEqual(snap["total"], 1)
+            self.assertEqual(snap["flags"][0]["duplicate_count"], 2)
+            self.assertEqual(set(snap["flags"][0]["ids"]), {"a", "b"})
+
+    def test_subjectless_legacy_rows_group_by_fallback_title_and_sender(self):
+        with TemporaryDirectory() as d:
+            db = os.path.join(d, "f.db")
+            make_db(db, [row("a", subject="", snippet="GIC applications open."),
+                         row("b", subject="", snippet="GIC applications open.")])
+            snap = inbound.snapshot(db, ttl=0)
+            self.assertEqual(snap["flags"][0]["duplicate_count"], 2)
+
     def test_email_bodies_are_never_exposed(self):
         with TemporaryDirectory() as d:
             db = os.path.join(d, "f.db")
@@ -78,7 +104,7 @@ class TestInbound(unittest.TestCase):
                              ["First thing", "Second thing"])
 
     def test_an_empty_subject_falls_back_to_the_matched_snippet(self):
-        """Cerberus stores no subject for most rows; sender alone is unreadable."""
+        """OWA does not always yield a subject; sender alone is unreadable."""
         with TemporaryDirectory() as d:
             db = os.path.join(d, "f.db")
             make_db(db, [row(subject="")])
@@ -123,8 +149,16 @@ class TestInbound(unittest.TestCase):
             self.assertEqual(len(inbound.open_flags(db)), inbound.MAX_ROWS)
 
     def test_the_env_var_overrides_the_default_path(self):
-        os.environ["INTUITION_CERBERUS_DB"] = r"X:\elsewhere\flagged.db"
+        os.environ[inbound.ENV_VAR] = r"X:\elsewhere\flagged.db"
         self.assertEqual(inbound.default_path(), r"X:\elsewhere\flagged.db")
+        self.assertEqual(inbound.resolve_path("NTU"), r"X:\elsewhere\flagged.db")
+
+    def test_the_default_path_stays_inside_this_project(self):
+        """Independence, asserted: no sibling checkout may appear in the default."""
+        path = inbound.default_path("NTU")
+        self.assertTrue(path.startswith(os.path.join("NTU", ".ntu_learn_downloader")))
+        self.assertNotIn("J.A.R.V.I.S", path)
+        self.assertNotIn("cerberus", path.lower())
 
     def test_results_are_cached_between_polls(self):
         with TemporaryDirectory() as d:

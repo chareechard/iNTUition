@@ -1,11 +1,12 @@
 """Cache behaviour, and the request-count guarantees that justify it."""
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from ntu_learn_downloader import rest
-from ntu_learn_downloader.contentcache import ContentCache, cache_path
+from ntu_learn_downloader.contentcache import ContentCache, NEGATIVE_TTL, cache_path
 from ntu_learn_downloader.tests.test_rest import (
     BbRouter,
     COURSE_ID,
@@ -69,6 +70,22 @@ class TestContentCache(unittest.TestCase):
             c.put_attachments("_a_1", "_1_1", "T", [{"id": "x"}])
             self.assertIsNone(c.get_attachments("_b_1", "_1_1", "T"))
 
+    def test_legacy_empty_result_is_refetched(self):
+        """Old permanent negative rows caused newly published SC2002 files to vanish."""
+        with TemporaryDirectory() as root:
+            c = ContentCache(root)
+            c.courses = {COURSE_ID: {"_1_1": {"modified": "T1", "attachments": []}}}
+            self.assertIsNone(c.get_attachments(COURSE_ID, "_1_1", "T1"))
+
+    def test_empty_result_expires_even_when_parent_stamp_does_not(self):
+        with TemporaryDirectory() as root:
+            c = ContentCache(root)
+            c.put_attachments(COURSE_ID, "_1_1", "T1", [])
+            c.courses[COURSE_ID]["_1_1"]["checked_at"] = (
+                datetime.now(timezone.utc) - NEGATIVE_TTL - timedelta(seconds=1)
+            ).isoformat()
+            self.assertIsNone(c.get_attachments(COURSE_ID, "_1_1", "T1"))
+
 
 class TestScanRequestCost(unittest.TestCase):
     """The efficiency claim, pinned as a test rather than a promise."""
@@ -76,7 +93,7 @@ class TestScanRequestCost(unittest.TestCase):
     def _count(self, cache):
         calls = {"contents": 0, "attachments": 0, "children": 0}
 
-        def counting(url, headers=None, cookies=None, params=None):
+        def counting(url, headers=None, cookies=None, params=None, **_kwargs):
             if "/attachments" in url:
                 calls["attachments"] += 1
             elif "/children" in url:
@@ -85,7 +102,7 @@ class TestScanRequestCost(unittest.TestCase):
                 calls["contents"] += 1
             return fake_get(url, headers=headers, cookies=cookies, params=params)
 
-        with patch("ntu_learn_downloader.rest.requests.get", counting):
+        with patch("ntu_learn_downloader.rest._SESSION.get", counting):
             tree, _ = rest.get_download_dir(BbRouter, "CE2003", COURSE_ID, cache=cache)
         return calls, tree
 

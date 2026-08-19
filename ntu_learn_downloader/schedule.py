@@ -355,6 +355,7 @@ class Schedule:
         self.courses: List[Dict] = []
         self.semester: str = ""
         self.imported_at: Optional[str] = None
+        self.overrides: List[Dict] = []
         self.load()
 
     def load(self):
@@ -369,6 +370,7 @@ class Schedule:
             self.courses = data.get("courses", [])
             self.semester = data.get("semester", "")
             self.imported_at = data.get("imported_at")
+            self.overrides = data.get("overrides", [])
         except (ValueError, OSError):
             self.sessions = []
 
@@ -383,6 +385,7 @@ class Schedule:
             "exams": self.exams,
             "courses": self.courses,
             "semester": self.semester,
+            "overrides": self.overrides,
         }
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -409,6 +412,88 @@ class Schedule:
 
     def week(self, teaching_week: Optional[int] = None) -> Dict[str, List[Dict]]:
         return {d: self.for_day(d, teaching_week) for d in DAYS}
+
+    def set_announcement_overrides(self, changes: List[Dict]):
+        """Replace announcement-derived date exceptions with a validated set."""
+        allowed = {"cancel", "change", "add", "pattern"}
+        clean = []
+        for change in changes:
+            action = str(change.get("action") or "").lower()
+            course = str(change.get("course") or "").strip().upper()
+            if action not in allowed or not course:
+                continue
+            if action == "pattern":
+                if not str(change.get("weeks") or "").strip():
+                    continue
+            else:
+                try:
+                    datetime.strptime(str(change.get("date") or ""), "%Y-%m-%d")
+                except ValueError:
+                    continue
+            row = {k: str(change.get(k) or "").strip() for k in
+                   ("date", "course", "action", "type", "old_start", "start",
+                    "end", "venue", "weeks", "source_id", "source_title", "reason")}
+            clean.append(row)
+        self.overrides = clean
+        return len(clean)
+
+    def dynamic_week(self, monday, teaching_week: Optional[int] = None):
+        """Overlay dated professor-announcement exceptions on the recurring week."""
+        from ntu_learn_downloader import academic_calendar as cal
+        effective = [dict(row) for row in self.sessions]
+        for change in self.overrides:
+            if change.get("action") != "pattern":
+                continue
+            course = change["course"].upper()
+            kind = change.get("type", "").upper()
+            old_start = change.get("old_start", "")
+            matches = [row for row in effective
+                       if course in str(row.get("course", "")).upper()
+                       and (not kind or kind in str(row.get("type", "")).upper())
+                       and (not old_start or row.get("start") == old_start)]
+            if len(matches) == 1:
+                matches[0]["weeks"] = change["weeks"]
+                matches[0].update(dynamic=True, change=change)
+        week = {day: [row for row in effective if row["day"] == day and
+                      (teaching_week is None or cal.runs_in_week(
+                          row.get("weeks", ""), teaching_week))]
+                for day in DAYS}
+        for change in self.overrides:
+            if change.get("action") == "pattern":
+                continue
+            try:
+                when = datetime.strptime(change["date"], "%Y-%m-%d").date()
+            except (ValueError, KeyError):
+                continue
+            offset = (when - monday).days
+            if offset < 0 or offset >= len(DAYS):
+                continue
+            day = DAYS[offset]
+            rows = week[day]
+            course = change["course"].upper()
+            kind = change.get("type", "").upper()
+            old_start = change.get("old_start", "")
+            matches = [row for row in rows
+                       if course in str(row.get("course", "")).upper()
+                       and (not kind or kind in str(row.get("type", "")).upper())
+                       and (not old_start or row.get("start") == old_start)]
+            action = change["action"]
+            if action == "cancel":
+                week[day] = [row for row in rows if row not in matches]
+            elif action == "change" and len(matches) == 1:
+                row = matches[0]
+                for key in ("start", "end", "venue"):
+                    if change.get(key):
+                        row[key] = change[key]
+                row.update(dynamic=True, change=change)
+            elif action == "add" and change.get("start") and change.get("end"):
+                week[day].append({"course": change["course"],
+                                  "type": change.get("type", ""), "day": day,
+                                  "start": change["start"], "end": change["end"],
+                                  "venue": change.get("venue", ""), "weeks": "",
+                                  "dynamic": True, "change": change})
+            week[day].sort(key=lambda row: row.get("start", ""))
+        return week
 
     def upcoming(self, now: Optional[datetime] = None, limit: int = 5) -> List[Dict]:
         """The next few sessions from ``now``, rolling into following days."""

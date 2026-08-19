@@ -93,7 +93,7 @@ class TestSelection(unittest.TestCase):
 
     def test_the_storage_dir_is_never_offered(self):
         with TemporaryDirectory() as root:
-            touch(root, ".ntu_learn_downloader/rnd.json")
+            touch(root, ".ntu_learn_downloader/ledger.json")
             touch(root, ".ntu_learn_downloader/research/materials/SC2005 notes.txt")
             self.assertEqual(materials.select("SC2005", root), [])
 

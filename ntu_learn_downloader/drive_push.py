@@ -3,7 +3,7 @@
     python -m ntu_learn_downloader.drive_push --download_to NTU
 
 Mirrors the folder structure as-is, so ``NTU/26S1-ML0004.../Tutorial Materials/x.pdf``
-lands at ``NTULearn/26S1-ML0004.../Tutorial Materials/x.pdf`` in Drive.
+lands at ``iNTUition/26S1-ML0004.../Tutorial Materials/x.pdf`` in Drive.
 
 Safe to re-run and safe to schedule: uploads are verified before the local file is
 removed, and anything already recorded in the ledger is left alone.
@@ -11,18 +11,35 @@ removed, and anything already recorded in the ledger is left alone.
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
 from typing import Dict, List
 
 from ntu_learn_downloader import drive
 from ntu_learn_downloader.ledger import STORAGE_DIR, Ledger
 
 
+def _mtime_stamp(path: str) -> str:
+    """Local modification time as a Blackboard-shaped UTC timestamp.
+
+    Walking the disk gives us no Blackboard metadata, but the ledger needs *some*
+    stamp: recorded as None, a later scan can never prove the archived file went
+    stale, so Blackboard updates would silently never come back down. The local
+    mtime is the right proxy - it is exactly what ``sync.classify`` compares the
+    remote stamp against while the file is still on disk.
+    """
+    return (
+        datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def collect_files(download_root: str) -> List[Dict]:
     """Every real file under the download root, excluding tool bookkeeping."""
     found: List[Dict] = []
     for dirpath, dirnames, filenames in os.walk(download_root):
-        # Do not upload our own state directory.
-        dirnames[:] = [d for d in dirnames if d != STORAGE_DIR]
+        # Do not upload internal state directories.
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for filename in filenames:
             # Dummy markers for declined videos are local-only bookkeeping.
             if filename.startswith("."):
@@ -33,7 +50,7 @@ def collect_files(download_root: str) -> List[Dict]:
                     "path": full,
                     "rel_path": os.path.relpath(full, download_root),
                     "size": os.path.getsize(full),
-                    "modified": None,
+                    "modified": _mtime_stamp(full),
                 }
             )
     return sorted(found, key=lambda e: e["rel_path"])
@@ -109,7 +126,7 @@ def run_check(drive_folder: str) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Move downloaded NTULearn materials into Google Drive"
+        description="Move downloaded iNTUition materials into Google Drive"
     )
     parser.add_argument("--download_to", default="NTU", help="Local folder to push from")
     parser.add_argument(
@@ -177,23 +194,33 @@ def main():
 
     mirror = drive.DriveMirror(service, root_folder=args.drive_folder)
 
-    pushed = failed = 0
-    for index, entry in enumerate(files, start=1):
-        label = "[{}/{}] {}".format(index, len(files), entry["rel_path"])
-        sys.stdout.write(label + " ... ")
-        sys.stdout.flush()
-        try:
-            drive.push_file(
-                mirror, entry, root, ledger, move=not args.keep_local
-            )
-            pushed += 1
-            print("ok")
-        except Exception as e:  # noqa: BLE001 - one bad file must not end the run
-            failed += 1
-            print("FAILED: {}".format(e))
-        finally:
-            # Persist after each file so an interrupted run does not lose its record.
-            ledger.save()
+    # This is "safe to schedule" (see module docstring) precisely because of this
+    # lock: without it, a scheduled run overlapping the dashboard's own push (or two
+    # scheduled runs overlapping each other) can each miss the other's brand new
+    # upload and duplicate it - Drive's create-vs-update check is only eventually
+    # consistent. See drive.push_lock.
+    try:
+        with drive.push_lock():
+            pushed = failed = 0
+            for index, entry in enumerate(files, start=1):
+                label = "[{}/{}] {}".format(index, len(files), entry["rel_path"])
+                sys.stdout.write(label + " ... ")
+                sys.stdout.flush()
+                try:
+                    drive.push_file(
+                        mirror, entry, root, ledger, move=not args.keep_local
+                    )
+                    pushed += 1
+                    print("ok")
+                except Exception as e:  # noqa: BLE001 - one bad file must not end the run
+                    failed += 1
+                    print("FAILED: {}".format(e))
+                finally:
+                    # Persist after each file so an interrupted run does not lose its record.
+                    ledger.save()
+    except drive.PushLockError as e:
+        print("\n{}".format(e))
+        return 1
 
     print("\nPushed {}, failed {}. Ledger holds {} entries.".format(
         pushed, failed, len(ledger)))

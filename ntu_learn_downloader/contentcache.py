@@ -17,10 +17,15 @@ the next scan just pays full price once and rebuilds it.
 import json
 import os
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 STORAGE_DIR = ".ntu_learn_downloader"
 CACHE_FILENAME = "content_cache.json"
+# An empty attachment list is weak evidence: Blackboard can publish a file after the
+# parent document's modified stamp has settled (seen in SC2002). Positive results stay
+# stamp-cached indefinitely; negative results get checked again on later scans.
+NEGATIVE_TTL = timedelta(minutes=10)
 
 
 def cache_path(download_root: str) -> str:
@@ -71,8 +76,22 @@ class ContentCache:
             if entry is None or not modified or entry.get("modified") != modified:
                 self.misses += 1
                 return None
+            attachments = entry.get("attachments", [])
+            if not attachments:
+                try:
+                    checked = datetime.fromisoformat(entry["checked_at"])
+                    if checked.tzinfo is None:
+                        checked = checked.replace(tzinfo=timezone.utc)
+                except (KeyError, TypeError, ValueError):
+                    # Old cache rows did not record when an empty result was observed;
+                    # treating them as stale repairs installs affected by this bug.
+                    self.misses += 1
+                    return None
+                if datetime.now(timezone.utc) - checked > NEGATIVE_TTL:
+                    self.misses += 1
+                    return None
             self.hits += 1
-            return entry.get("attachments", [])
+            return attachments
 
     def put_attachments(
         self,
@@ -88,6 +107,7 @@ class ContentCache:
             self.courses.setdefault(course_id, {})[content_id] = {
                 "modified": modified,
                 "attachments": attachments,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
             }
 
     def prune(self, course_id: str, live_ids):

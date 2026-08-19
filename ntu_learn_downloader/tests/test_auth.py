@@ -2,6 +2,7 @@ import os
 import time
 import unittest
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from ntu_learn_downloader import auth
 
@@ -56,6 +57,21 @@ class TestAuth(unittest.TestCase):
     def test_validate_strips_quotes(self):
         self.assertEqual(auth.validate('"{}"'.format(valid_token())), valid_token())
 
+    def test_validate_strips_cookie_name_and_separator(self):
+        # What you get from the Network tab's Cookie header rather than from the
+        # Application tab's value column.
+        self.assertEqual(
+            auth.validate("BbRouter={};".format(valid_token())), valid_token()
+        )
+        self.assertEqual(auth.validate("bbrouter=" + valid_token()), valid_token())
+
+    def test_validate_keeps_expiry_readable_when_named(self):
+        # The prefix used to parse into a leading "BbRouter=expires" field, which
+        # left the expiry unreadable and the token quietly unusable.
+        self.assertIsNotNone(
+            auth.expires_at(auth.validate("BbRouter=" + valid_token()))
+        )
+
     def test_save_and_load_roundtrip(self):
         with TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "session.json")
@@ -76,6 +92,11 @@ class TestAuth(unittest.TestCase):
             self.assertEqual(auth.resolve(token, token_path=path), token)
             # Now resolvable with no argument.
             self.assertEqual(auth.resolve(None, token_path=path), token)
+
+    def test_resolve_accepts_valid_token_when_cache_is_unwritable(self):
+        token = valid_token()
+        with patch.object(auth, "save_token", side_effect=PermissionError("denied")):
+            self.assertEqual(auth.resolve(token), token)
 
     def test_resolve_without_token_raises(self):
         with TemporaryDirectory() as tmp:

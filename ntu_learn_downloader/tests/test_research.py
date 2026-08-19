@@ -3,7 +3,7 @@ import os
 import unittest
 from tempfile import TemporaryDirectory
 
-from ntu_learn_downloader import research, rnd
+from ntu_learn_downloader import claude_bridge, research
 
 
 class Block:
@@ -83,6 +83,58 @@ class TestPrompt(unittest.TestCase):
         self.assertNotIn("Course:", prompt)
         self.assertNotIn("My notes:", prompt)
         self.assertNotIn("Courses I am taking", prompt)
+
+    def test_the_direction_is_absent_unless_one_is_set(self):
+        """Optional means the prompt is byte-identical when nothing is typed."""
+        item = {"title": "Flashcards", "course": "MH2500"}
+        self.assertEqual(research.build_prompt(item),
+                         research.build_prompt(item, direction=""))
+        self.assertEqual(research.build_prompt(item),
+                         research.build_prompt(item, direction="   \n  "))
+        self.assertNotIn("direction I want", research.build_prompt(item))
+
+    def test_the_direction_reaches_the_prompt_when_set(self):
+        prompt = research.build_prompt(
+            {"title": "Flashcards"}, direction="Prefer things I can finish quickly")
+        self.assertIn("Prefer things I can finish quickly", prompt)
+        self.assertIn("direction I want", prompt)
+
+    def test_the_direction_is_a_preference_not_a_cage(self):
+        """A steer must not be able to suppress a better answer outside it."""
+        prompt = research.build_prompt({"title": "x"}, direction="only Rust")
+        self.assertIn("falls outside it, say so and give it anyway", prompt)
+
+    def test_the_direction_does_not_displace_the_entry(self):
+        prompt = research.build_prompt(
+            {"title": "Flashcards", "course": "MH2500", "notes": "from transcripts"},
+            courses=["SC2002"], direction="Lean mathematical")
+        for expected in ("Flashcards", "MH2500", "from transcripts", "SC2002",
+                         "Lean mathematical"):
+            self.assertIn(expected, prompt)
+
+    def test_the_academic_year_is_not_mistaken_for_a_course(self):
+        """"AY2026" has a course code's exact shape and leads the verbose name.
+
+        Lives here because the consequence is prompt content: every run used to tell
+        the model it was taking a course called AY2026.
+        """
+        import threading
+
+        from ntu_learn_downloader import dashboard
+
+        class FakeState:
+            lock = threading.Lock()
+            courses = [
+                {"name": "26S1-SC2002-OBJECT ORIENTED DESIGN & PROGRAMMING"},
+                {"name": "AY2026-2027, Semester 1, MH2100 (Calculus III)"},
+                {"name": "CC0015-HEALTH & WELLBEING (T002) AY2025/26 SEM 2"},
+                {"name": "Personal Data Protection Act (PDPA) e-Learning"},
+            ]
+
+        codes = dashboard.course_codes(FakeState())
+        self.assertEqual(codes, ["CC0015", "MH2100", "SC2002"])
+        self.assertNotIn("AY2026", codes)
+        self.assertNotIn("AY2025", codes)
 
     def test_no_filesystem_paths_leak_into_the_prompt(self):
         """The prompt builder must not be able to reach the download folder."""
@@ -295,6 +347,14 @@ class TestCliIsolation(unittest.TestCase):
             research.research_via_cli({"title": "x"}, download_root=root, runner=runner)
             self.assertEqual(runner.kwargs["cwd"], research.sandbox_dir(root))
 
+    def test_the_session_gets_no_console_of_its_own(self):
+        """Without this the windowed desktop build flashes a terminal per run."""
+        with TemporaryDirectory() as root:
+            runner = Runner()
+            research.research_via_cli({"title": "x"}, download_root=root, runner=runner)
+            self.assertEqual(runner.kwargs["creationflags"],
+                             claude_bridge.no_window())
+
 
 class TestCliBackend(unittest.TestCase):
     def test_parses_a_successful_run(self):
@@ -406,6 +466,24 @@ class TestCliBackend(unittest.TestCase):
         self.assertIn("MH2500", joined)
         self.assertNotIn("lecture.pdf", joined)
 
+    def test_the_direction_reaches_the_cli_backend(self):
+        """The steer is wired end to end, not just into build_prompt."""
+        with TemporaryDirectory() as root:
+            runner = Runner()
+            research.research({"title": "Flashcards"}, download_root=root,
+                              runner=runner, direction="Lean mathematical")
+        self.assertIn("Lean mathematical", " ".join(runner.cmd))
+
+    def test_no_direction_leaves_the_command_unchanged(self):
+        with TemporaryDirectory() as root:
+            without = Runner()
+            research.research({"title": "Flashcards"}, download_root=root,
+                              runner=without)
+            blank = Runner()
+            research.research({"title": "Flashcards"}, download_root=root,
+                              runner=blank, direction="")
+        self.assertEqual(without.cmd, blank.cmd)
+
 
 class TestMaterialsSharing(unittest.TestCase):
     """Course material is the one thing that changes the data boundary, so the
@@ -503,7 +581,8 @@ class TestBackendChoice(unittest.TestCase):
 
     def test_nonsense_falls_through_to_detection(self):
         self.assertIn(research.resolve_backend("banana"),
-                      (research.BACKEND_CLI, research.BACKEND_API, None))
+                      (research.BACKEND_OMNIROUTE, research.BACKEND_CLI,
+                       research.BACKEND_API, None))
 
     def test_a_runner_routes_to_the_cli_and_a_client_to_the_api(self):
         with TemporaryDirectory() as root:
@@ -567,50 +646,13 @@ class TestKey(unittest.TestCase):
         self.assertNotIn("secret", research.credential_source())
 
 
-class TestBoardStorage(unittest.TestCase):
-    def test_finding_round_trips_to_disk(self):
-        with TemporaryDirectory() as root:
-            board = rnd.Board(root)
-            item = board.add("Scheduler simulator", course="SC2005")
-            self.assertIsNone(item["research"])
-            finding = research.research({"title": item["title"]},
-                                        client=FakeClient(ok_message()))
-            board.set_research(item["id"], finding)
-            board.save()
-
-            again = rnd.Board(root)
-            stored = again.get(item["id"])["research"]
-            self.assertEqual(stored["text"], finding["text"])
-            self.assertEqual(len(stored["sources"]), 2)
-
-    def test_finding_can_be_discarded(self):
-        with TemporaryDirectory() as root:
-            board = rnd.Board(root)
-            item = board.add("x")
-            board.set_research(item["id"], {"text": "t"})
-            board.set_research(item["id"], None)
-            self.assertIsNone(board.get(item["id"])["research"])
-
-    def test_set_research_on_a_missing_id(self):
-        with TemporaryDirectory() as root:
-            self.assertIsNone(rnd.Board(root).set_research("nope", {"text": "t"}))
-
-    def test_update_cannot_write_a_finding(self):
-        """Free-text edits must not be able to forge a Claude finding."""
-        with TemporaryDirectory() as root:
-            board = rnd.Board(root)
-            item = board.add("x")
-            board.update(item["id"], research={"text": "forged"})
-            self.assertIsNone(board.get(item["id"])["research"])
-
-
 if __name__ == "__main__":
     unittest.main()
 
 
 class TestVendoredBridge(unittest.TestCase):
-    """The isolation flags are shared with Cerberus by vendoring one file. A copy
-    that drifts is how a security flag gets silently dropped from one caller."""
+    """Any vendored copy of the bridge must match the source. A copy that drifts
+    is how a security flag gets silently dropped from one caller."""
 
     def test_the_vendored_copies_match_the_source(self):
         import sys
@@ -627,7 +669,7 @@ class TestVendoredBridge(unittest.TestCase):
         self.assertEqual(drifted, [], "vendored copy drifted; run tools/check_vendored.py --sync")
 
     def test_a_no_tools_run_passes_an_empty_tool_set(self):
-        """Cerberus's triage is pure classification - it must get no tools at all."""
+        """Triage is pure classification - it must get no tools at all."""
         from ntu_learn_downloader import claude_bridge
         cmd = claude_bridge.build_command("p", tools=(), json_schema='{"type":"object"}')
         self.assertEqual(cmd[cmd.index("--tools") + 1], "")

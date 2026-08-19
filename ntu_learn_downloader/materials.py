@@ -1,4 +1,4 @@
-"""Pick and stage the course materials one R&D entry is allowed to see.
+"""Pick and stage the course materials one research item is allowed to see.
 
 Research is more useful when it knows what the course actually covers - "build a
 scheduler simulator" gets a better answer from something that has read the lecture on

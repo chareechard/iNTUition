@@ -1,6 +1,6 @@
 import os
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from tempfile import TemporaryDirectory
 
 from ntu_learn_downloader import schedule
@@ -211,6 +211,56 @@ class TestStarsPdf(unittest.TestCase):
 
 
 class TestWeekAwareStore(unittest.TestCase):
+    def test_announcement_changes_overlay_only_the_named_date(self):
+        with TemporaryDirectory() as root:
+            s = schedule.Schedule(root)
+            s.replace([{"course": "SC2005", "type": "LEC", "day": "MON",
+                        "start": "09:30", "end": "10:20", "venue": "LT1",
+                        "weeks": "", "index": ""}])
+            self.assertEqual(s.set_announcement_overrides([
+                {"date": "2026-08-10", "course": "SC2005", "action": "change",
+                 "type": "LEC", "old_start": "09:30", "start": "10:30",
+                 "end": "11:20", "venue": "LT2", "source_id": "a"},
+                {"date": "not-a-date", "course": "SC2005", "action": "cancel"},
+            ]), 1)
+            week = s.dynamic_week(date(2026, 8, 10), 1)
+            self.assertEqual(week["MON"][0]["start"], "10:30")
+            self.assertEqual(week["MON"][0]["venue"], "LT2")
+            self.assertTrue(week["MON"][0]["dynamic"])
+            self.assertEqual(s.week(1)["MON"][0]["start"], "09:30")
+
+    def test_cancellation_and_makeup_are_applied(self):
+        with TemporaryDirectory() as root:
+            s = schedule.Schedule(root)
+            s.replace([{"course": "SC2005", "type": "TUT", "day": "TUE",
+                        "start": "11:30", "end": "12:20", "venue": "TR1",
+                        "weeks": "", "index": ""}])
+            s.set_announcement_overrides([
+                {"date": "2026-08-11", "course": "SC2005", "action": "cancel",
+                 "type": "TUT", "old_start": "11:30"},
+                {"date": "2026-08-12", "course": "SC2005", "action": "add",
+                 "type": "TUT", "start": "13:30", "end": "14:20", "venue": "TR2"},
+            ])
+            week = s.dynamic_week(date(2026, 8, 10), 1)
+            self.assertEqual(week["TUE"], [])
+            self.assertEqual(week["WED"][0]["venue"], "TR2")
+
+    def test_announcement_can_replace_a_recurring_week_pattern(self):
+        with TemporaryDirectory() as root:
+            s = schedule.Schedule(root)
+            s.replace([{"course": "SC2001", "type": "LAB", "day": "WED",
+                        "start": "14:30", "end": "16:20", "venue": "HWLAB3",
+                        "weeks": "Wk1,3,5,7,9,11,13", "index": "10154"}])
+            self.assertEqual(s.set_announcement_overrides([{
+                "date": "", "course": "SC2001", "action": "pattern", "type": "LAB",
+                "old_start": "14:30", "weeks": "Wk7,9,11,13",
+                "source_id": "a", "source_title": "Welcome",
+            }]), 1)
+            self.assertEqual(s.dynamic_week(date(2026, 8, 10), 5)["WED"], [])
+            row = s.dynamic_week(date(2026, 8, 24), 7)["WED"][0]
+            self.assertTrue(row["dynamic"])
+            self.assertEqual(row["weeks"], "Wk7,9,11,13")
+
     def test_for_day_filters_by_teaching_week(self):
         with TemporaryDirectory() as root:
             s = schedule.Schedule(root)

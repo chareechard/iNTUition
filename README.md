@@ -1,11 +1,13 @@
-# NTU Learn Downloader
+# iNTUition
 
-Command line interface to downloading files from [NTULearn](http://ntulearn.ntu.edu.sg). See
-[NTULearn-Downloader-GUI](https://github.com/leafgecko/NTULearn-Downloader-GUI) if you prefer a graphical user interface (GUI).
+iNTUition is a learning-operations dashboard and command-line toolkit for NTU. It downloads course
+materials from [NTULearn](http://ntulearn.ntu.edu.sg), tracks schedules and tasks, and integrates
+optional research, mail-triage, transcription, and Google Drive workflows.
 
 ## Update (2026)
 
-NTULearn has changed substantially since this tool was written. It has been updated to match:
+NTULearn has changed substantially since the original downloader was written. iNTUition has been
+updated to match:
 
 - **Platform**: NTU now runs Blackboard Learn SaaS (4000.x) with **Ultra base navigation**, not the
   self-hosted Original install this tool originally scraped. Content is now read through the
@@ -23,6 +25,13 @@ NTULearn has changed substantially since this tool was written. It has been upda
   reported as skipped rather than silently dropped.
 - Quizzes (`x-bb-asmt-test-link`) and SCORM packages (`x-plugin-scormengine`) have no file behind
   them and are ignored.
+
+### Compatibility after the migration
+
+The distribution and application are named **iNTUition**. The import package
+`ntu_learn_downloader` and the `.ntu_learn_downloader` state directory intentionally keep their
+historic names so existing scripts, cached sessions, ledgers, and downloaded-course metadata keep
+working without a destructive data migration.
 
 ## Getting a session token
 
@@ -141,22 +150,15 @@ Measured on an 8-core CPU with `small.en`: ~59 minutes of lecture audio took 29 
 realtime. `base.en` is faster but noticeably worse on technical vocabulary; `medium.en` is about
 realtime on CPU.
 
-## R&D board and the Claude backend
+## The Claude research backend
 
-The R&D panel is a single board across every course — a place to log tools you are thinking of
-building, each with a course tag and a status (`idea → researching → prototyping → built`, plus
-`parked`). It is plain local state in `.ntu_learn_downloader/rnd.json` and works with no network at
-all.
-
-Pressing **research** on one entry sends it to Claude, which searches the web and answers with a
-verdict, prior art with links, the smallest first version worth building, and the likely pitfalls.
-The finding is stored on the entry, so it survives restarts and a semester rollover.
+Several dashboard features — Todo research, the materials chat, and the Drive learning chat — call
+through a shared Claude backend (`research.py` / `ai_provider.py`). Set it up and check it from the
+command line:
 
 ```
 python -m ntu_learn_downloader.research_run --setup      # the two backends, and what each needs
 python -m ntu_learn_downloader.research_run --check      # backend, isolation, then one live call
-python -m ntu_learn_downloader.research_run --list
-python -m ntu_learn_downloader.research_run --id <id>    # or --all for every unresearched entry
 ```
 
 ### Two backends
@@ -167,73 +169,86 @@ python -m ntu_learn_downloader.research_run --id <id>    # or --all for every un
 | Credential | the login you already have — nothing stored by iNTUition | `ANTHROPIC_API_KEY`, `~/.ntu_learn_downloader/anthropic_key`, or an `ant auth login` profile |
 | Billing | your Claude Code usage | Anthropic API, billed separately from a Claude subscription |
 | Model | `opus` alias, resolved by the CLI | `claude-opus-5`, adaptive thinking, streamed |
-| Cost cap | `--max-budget-usd`, hard, per entry | none (bounded by `max_tokens`) |
 
 Pick one with `--backend cli|api` or `INTUITION_RESEARCH_BACKEND`; otherwise the CLI is used when
 installed and the API otherwise. Either way only the *name* of the active credential appears in the
 UI, never its value.
 
-### The isolated research session (cli backend)
-
-"Independent of the terminal and other channels" is enforced by the flags in
-`research.build_cli_command`, each of which has a test asserting it is passed:
-
-| Flag | Effect |
-|---|---|
-| `--safe-mode` | no CLAUDE.md, skills, plugins, hooks, custom agents, output styles or MCP servers — none of your Claude Code setup reaches it |
-| `--strict-mcp-config` (no `--mcp-config`) | zero MCP servers, belt and braces |
-| `--no-session-persistence` | nothing written to the session store: the run cannot be resumed and never shows up in `claude -c` or `--resume` |
-| `--tools "WebSearch,WebFetch"` | the built-in tool set is pinned to the two web tools — no Bash, Read, Edit, Write or Task |
-| `--allowed-tools WebSearch WebFetch` | pre-approves exactly those, since print mode has no human to ask |
-| `--permission-mode dontAsk` | anything else is refused outright rather than hanging on a prompt |
-| `--system-prompt` | replaces the coding-agent prompt entirely — a researcher, not an engineer with your filesystem |
-| `--max-budget-usd` | hard per-entry ceiling |
-| cwd | an empty sandbox at `<download_root>/.ntu_learn_downloader/research/`, not the repo and not your course tree |
-
-`--dangerously-skip-permissions` is never passed, and a test asserts it never will be. If a tool is
-denied anyway, the finding says so in the text rather than passing an unsourced answer off as
-researched. The CLI returns prose rather than content blocks, so citations are the links it printed.
-
-**What leaves the machine, and what does not.** This is the only part of iNTUition that talks to a
-third party other than NTULearn and Drive, so the boundary is deliberately narrow:
-
-| Always sent | Sent only with materials sharing on | Never sent |
-|---|---|---|
-| The entry you typed: title, notes, link, course tag | A capped selection of readable files for **that entry's course tag** | Material for any other course |
-| The course codes you are enrolled in | Transcripts, slides, handouts — staged, then deleted | Videos and audio (skipped: unreadable, enormous) |
-| — | Whatever the model chooses to read from the sandbox | Your session token, or anything from another course's folder |
-
-**Materials sharing is a toggle in the panel, and it changes the boundary.** With it off, only the
-first column leaves the machine. With it on, `materials.select` picks at most 12 files totalling at
-most 12 MB for the entry's own course — transcripts ranked above documents — copies them into the
-sandbox, and deletes them when the run ends (in a `finally`, so a crash cleans up too). Every finding
-records exactly which files it read, so it stays auditable after the fact. Files already moved to
-Drive are pulled back for the run.
-
-The prompt is assembled in one place, `research.build_prompt`, so it can be read in full in a few
-lines; tests assert a path or filename on an entry reaches neither the prompt nor the CLI's argv, and
-that read tools appear only when material was actually staged. Nothing is ever sent on a scan, a poll,
-or a page load — only on that press, per entry.
-
 ## Inbound (optional)
 
-If Cerberus — a separate, private email-triage project — is checked out beside this one, the
-dashboard shows an **Inbound** panel: NTU mail it flagged as
-needing action (scholarship milestones, URECA, recruiting deadlines), most urgent first, beside the
-teaching week.
+The dashboard's **Inbound** panel shows NTU mail that needs action — scholarship milestones, URECA,
+recruiting deadlines — most urgent first, beside the teaching week. The whole pipeline lives in this
+package: `owa.py` reads the mailbox, `triage.py` decides what matters, `triage_store.py` records it,
+and `inbound.py` renders it. Nothing outside this project is involved.
 
-The coupling is the weakest kind available. `inbound.py` opens `cerberus/storage/flagged.db` with
-SQLite's `mode=ro` URI, so a bug here cannot mark something done or delete a row — Cerberus stays the
-only writer of its own state. Neither project imports the other; the file path is the whole interface,
-overridable with `--cerberus_db` or `INTUITION_CERBERUS_DB`. Email **bodies are never read** — subject,
-sender, priority and the one-line reason are enough to decide whether to open the mail, and a test
-asserts `body_content` never reaches the payload. If the database is absent, locked, corrupt or on an
-older schema, the panel hides itself rather than failing a poll.
+```
+python -m ntu_learn_downloader.triage_run --setup     # what to install, and why
+python -m ntu_learn_downloader.triage_run --login     # one time, and on expiry
+python -m ntu_learn_downloader.triage_run --backtest  # dry run: classify, record nothing
+python -m ntu_learn_downloader.triage_run --scan      # read, classify, record
+```
 
-Both projects drive the Claude CLI through the same `claude_bridge` module, which owns the isolation
-flags. Cerberus carries a vendored copy (it runs standalone and cannot import this package);
-`tools/check_vendored.py` and a test fail on drift, because a copy that quietly loses a flag is the
-entire risk that module exists to prevent.
+### Linking the mailbox
+
+Reading NTU mail means going through Outlook Web App, which needs Playwright:
+
+```
+pip install playwright
+python -m playwright install chromium
+```
+
+`--login` opens a real browser window on office.com. **You** complete NTU's SSO and MFA exactly as
+you normally would — nothing types on your behalf, and no password or MFA code is ever seen by this
+tool. Once your inbox renders, the resulting session cookies are saved to
+`.ntu_learn_downloader/owa_session.json`. Later scans replay that session headlessly. When it
+expires, OWA redirects to the login page, the scan says so, and you re-run `--login`.
+
+### What a scan costs, and what it reads
+
+A scan reads unread mail dated on or after the cutoff. Precedence: `--since` for one run, then
+`"since"` in `triage.json`, then **the start of the current semester**. Set `since` when the mailbox
+has a meaningful go-live date — mail from before it is noise you have already dealt with, and paying
+to classify it twice is the main avoidable cost here. OWA sorts newest-first, so the scan stops at
+the first row older than the cutoff instead of walking the mailbox.
+
+Then the two-stage funnel: a local regex/sender prefilter (`triage.json` — edit it, or bring an
+existing list over with `--import_from`), and a model call only on what survives. A full inbox costs
+a handful of classifications, not hundreds. Classification runs through `claude_bridge` **with no
+tools at all** and a strict response schema: an email is untrusted text written by a stranger, so it
+can ask for nothing and get nothing. A Critical or High resting on low self-reported confidence is
+downgraded a level.
+
+### What the panel can and cannot do
+
+`inbound.py` opens the store with SQLite's `mode=ro` URI, so a bug on a dashboard poll cannot mark
+something done or delete a row — `triage_store` stays the only writer. The file path is the whole
+interface, overridable with `--inbound_db` or `INTUITION_INBOUND_DB`, so any store in the same shape
+can be pointed at. Email **bodies are never written down** — subject, sender, priority and the
+one-line reason are enough to decide whether to open the mail, and a test asserts `body_content`
+never reaches the payload. If the database is absent, locked, corrupt or on an older schema, the
+panel hides itself rather than failing a poll. Flags self-clean: 60 days open, 7 days after done.
+
+### Backtesting before you trust it
+
+`--backtest` runs the same pipeline over mail **already** in the inbox — read and unread — and
+changes nothing: no flag recorded, nothing marked read, the store never opened. It prints the
+prefilter/verdict table, the priority distribution, and what the run cost, and writes full results
+(including bodies, which the store deliberately never keeps) to `.ntu_learn_downloader/backtest.jsonl`.
+Sample size defaults to 20; every message past the prefilter is one paid model call.
+
+This is worth running after any change to `triage.json`, and it earns its keep: the first live
+backtest on this tenant caught three defects that no unit test could have — every scraped subject
+arriving empty, a per-email budget ceiling low enough to kill calls mid-flight (which surfaces only
+as a silent `Low`), and messages keyed by conversation rather than item id, so thread siblings
+overwrote each other in the store.
+
+### The honest caveat
+
+This reads a rendered UI, not an API. Selectors in `owa.py` were calibrated against a live NTU
+tenant; a different OWA deploy ring can render a different DOM, and then they need adjusting against
+a real inbox with devtools. Everything that does not depend on those selectors — which rows get
+opened, the cutoff, the read/unread and pinned handling, stale-row recovery — is covered by tests
+against a fake page. A Graph API app registration is the sturdier path if this ever gets tiresome.
 
 ## Google Drive pipeline
 
@@ -241,7 +256,7 @@ The full flow is **scan → retrieve → push**: Blackboard content is staged in
 then moved into Drive with the folder structure mirrored, and the local copy reclaimed.
 
 ```
-NTULearn/                                    (Drive)
+iNTUition/                                    (Drive)
 └── 26S1-ML0004-CAREER DESIGN.../
     ├── Tutorial Materials/
     │   └── Tutorial 1/
@@ -311,7 +326,7 @@ python -m ntu_learn_downloader.drive_push --download_to NTU --keep_local  # copy
 ```
 
 Or press **Push to Drive** in the dashboard. Options: `--drive_folder` sets the Drive root
-(default `NTULearn`).
+(default `iNTUition`).
 
 ### The ledger — why deleting local files is safe
 
@@ -338,7 +353,7 @@ usage: main.py [-h] [--bbrouter BBROUTER] [--token_file TOKEN_FILE]
                [--ignore IGNORE] [--ignore_files]
                [--download_recorded_lectures] [--sem SEM] [--prompt]
 
-CLI wrapper to NTULearn Downloader
+CLI wrapper to iNTUition
 
 options:
   -h, --help            show this help message and exit

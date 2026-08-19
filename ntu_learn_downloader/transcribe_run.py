@@ -17,7 +17,6 @@ import os
 import sys
 import tempfile
 import time
-from typing import Dict, List
 
 from ntu_learn_downloader import drive, transcribe
 from ntu_learn_downloader.ledger import Ledger
@@ -64,62 +63,26 @@ def _ticker():
     return report
 
 
-def _drive_videos(svc, root_folder: str) -> List[Dict]:
-    """Every media file under the Drive root, with the folder it lives in."""
-    top = svc.files().list(
-        q="name='{}' and 'root' in parents and trashed=false and mimeType='{}'".format(
-            root_folder, drive.FOLDER_MIME),
-        fields="files(id,name)").execute().get("files", [])
-    if not top:
-        return []
-
-    found: List[Dict] = []
-
-    def walk(fid, path):
-        for f in svc.files().list(
-                q="'{}' in parents and trashed=false".format(fid),
-                fields="files(id,name,mimeType,size)", pageSize=500).execute().get("files", []):
-            if f["mimeType"] == drive.FOLDER_MIME:
-                walk(f["id"], path + "/" + f["name"])
-            elif transcribe.is_media(f["name"]):
-                found.append({"id": f["id"], "name": f["name"], "parent": fid,
-                              "path": path, "size": int(f.get("size") or 0)})
-
-    walk(top[0]["id"], "")
-    return found
-
-
-def _sibling_names(svc, parent_id: str) -> set:
-    return {
-        f["name"] for f in svc.files().list(
-            q="'{}' in parents and trashed=false".format(parent_id),
-            fields="files(name)", pageSize=500).execute().get("files", [])
-    }
-
-
 def backfill(root_folder: str, model: str, compute_type: str, threads: int,
              dry_run: bool = False) -> int:
     """Transcribe videos that are already in Drive and no longer held locally."""
     from googleapiclient.http import MediaIoBaseDownload
 
     svc = drive.build_service()
-    videos = _drive_videos(svc, root_folder)
-    if not videos:
+    mirror = drive.DriveMirror(svc, root_folder=root_folder)
+    # Same detection transcribe.classify_drive_media() gives the dashboard's
+    # Transcription tab, so "found under Drive/<root>/" means the same thing in
+    # both places.
+    media = transcribe.classify_drive_media(mirror.list_files())
+    if not media:
         print("No media found in Drive/{}/".format(root_folder))
         return 0
 
-    todo = []
-    for v in videos:
-        stem = os.path.splitext(v["name"])[0]
-        siblings = _sibling_names(svc, v["parent"])
-        if stem + ".vtt" in siblings and stem + ".txt" in siblings:
-            continue
-        todo.append(v)
-
+    todo = [e for e in media if e["status"] == transcribe.MISSING]
     print("{} media file(s) in Drive, {} without a transcript".format(
-        len(videos), len(todo)))
-    for v in todo:
-        print("  {}{}  ({:.1f} MB)".format(v["path"], "/" + v["name"], v["size"] / 1048576))
+        len(media), len(todo)))
+    for e in todo:
+        print("  {}  ({:.1f} MB)".format(e["rel_path"], e["size"] / 1048576))
     if dry_run or not todo:
         return 0
 
@@ -127,14 +90,14 @@ def backfill(root_folder: str, model: str, compute_type: str, threads: int,
     ok = failed = 0
 
     with tempfile.TemporaryDirectory(prefix="intuition_backfill_") as tmp:
-        for i, v in enumerate(todo, 1):
-            print("\n[{}/{}] {}".format(i, len(todo), v["name"]), flush=True)
-            local = os.path.join(tmp, v["name"])
+        for i, e in enumerate(todo, 1):
+            print("\n[{}/{}] {}".format(i, len(todo), e["rel_path"]), flush=True)
+            local = os.path.join(tmp, e["name"])
             try:
                 print("      downloading...", flush=True)
                 with open(local, "wb") as fh:
                     dl = MediaIoBaseDownload(
-                        fh, svc.files().get_media(fileId=v["id"]),
+                        fh, svc.files().get_media(fileId=e["drive_id"]),
                         chunksize=8 * 1024 * 1024)
                     done = False
                     while not done:
@@ -145,14 +108,15 @@ def backfill(root_folder: str, model: str, compute_type: str, threads: int,
                 print("      transcribed in {}".format(human_mins(time.time() - t0)),
                       flush=True)
 
-                mirror = drive.DriveMirror(svc, root_folder=root_folder)
+                parent_id = mirror.ensure_path(
+                    [p for p in os.path.dirname(e["rel_path"]).split("/") if p])
                 for kind in ("vtt", "txt"):
-                    mirror.upload(paths[kind], v["parent"])
+                    mirror.upload(paths[kind], parent_id)
                     print("      uploaded {}".format(os.path.basename(paths[kind])),
                           flush=True)
                 ok += 1
-            except Exception as e:  # noqa: BLE001 - one bad video must not end the run
-                print("      FAILED: {}".format(e), flush=True)
+            except Exception as e2:  # noqa: BLE001 - one bad video must not end the run
+                print("      FAILED: {}".format(e2), flush=True)
                 failed += 1
             finally:
                 # Reclaim the temp copy immediately; these are large.
@@ -167,7 +131,7 @@ def backfill(root_folder: str, model: str, compute_type: str, threads: int,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate Whisper transcripts for NTULearn lecture media")
+        description="Generate Whisper transcripts for iNTUition lecture media")
     parser.add_argument("--download_to", default="NTU",
                         help="Local staging folder to transcribe")
     parser.add_argument("--model", default=transcribe.DEFAULT_MODEL,

@@ -82,17 +82,33 @@ def is_generated(path: str) -> bool:
         return False
 
 
-def find_existing_transcripts(media_path: str) -> List[str]:
-    """Transcript-ish files that appear to belong to this media file.
+def _is_transcript_name(name: str, stem_low: str) -> bool:
+    """Does ``name`` look like a transcript belonging to a media file named ``stem_low``?
 
     Two shapes are accepted, matching how lecturers actually upload them:
       * same stem, caption extension     - "Lecture 1.mp4" + "Lecture 1.vtt"
       * a neighbour naming the media and saying transcript, in any doc format
         - "Lecture 1 transcript.docx", "Transcript - Lecture 1.pdf"
+
+    Shared between the local check (``find_existing_transcripts``, real files on
+    disk) and the Drive check (``_drive_transcript_status``, just a set of sibling
+    names from a Drive listing) so "what counts as a transcript" stays one rule.
     """
+    low = name.lower()
+    base, ext = os.path.splitext(low)
+    if base == stem_low and ext in CAPTION_EXTENSIONS + (".txt",):
+        return True
+    return bool(
+        ext in CAPTION_EXTENSIONS + DOC_EXTENSIONS
+        and any(w in low for w in TRANSCRIPT_WORDS)
+        and (stem_low in low or low.replace("transcript", "").strip(" -_.") in stem_low)
+    )
+
+
+def find_existing_transcripts(media_path: str) -> List[str]:
+    """Transcript-ish files that appear to belong to this media file."""
     directory = os.path.dirname(media_path) or "."
-    stem = os.path.splitext(os.path.basename(media_path))[0]
-    stem_low = stem.lower()
+    stem_low = os.path.splitext(os.path.basename(media_path))[0].lower()
     hits: List[str] = []
 
     try:
@@ -104,14 +120,7 @@ def find_existing_transcripts(media_path: str) -> List[str]:
         full = os.path.join(directory, name)
         if not os.path.isfile(full) or full == media_path:
             continue
-        low = name.lower()
-        base, ext = os.path.splitext(low)
-
-        if base == stem_low and ext in CAPTION_EXTENSIONS + (".txt",):
-            hits.append(full)
-        elif (ext in CAPTION_EXTENSIONS + DOC_EXTENSIONS
-              and any(w in low for w in TRANSCRIPT_WORDS)
-              and (stem_low in low or low.replace("transcript", "").strip(" -_.") in stem_low)):
+        if _is_transcript_name(name, stem_low):
             hits.append(full)
 
     return sorted(set(hits))
@@ -165,6 +174,69 @@ def survey(root: str) -> List[Dict]:
                 "sources": [os.path.basename(s) for s in info["sources"]],
             })
     return sorted(out, key=lambda e: e["rel_path"])
+
+
+def _drive_transcript_status(siblings: Dict[str, Dict], media_name: str) -> Dict:
+    """``transcript_status()`` for a file that lives in Drive, not on disk.
+
+    There is no local directory to list, so the caller supplies what it already
+    has - the other files in the same Drive folder, keyed by name. This can't check
+    a Drive ``.vtt``'s content for the GENERATED_MARKER the way ``is_generated``
+    does for a local file without downloading it just to look, so it takes a
+    same-named vtt+txt pair as our own output on trust - nothing else predictably
+    produces both, and a false positive here only means skipping a re-transcribe,
+    never overwriting anything.
+    """
+    stem_low = os.path.splitext(media_name)[0].lower()
+    ours = transcript_paths(media_name)
+    ours_vtt, ours_txt = ours["vtt"], ours["txt"]
+    # Only a complete, exactly-named pair is trusted as our own output - a lone vtt
+    # (even one that happens to share our naming convention) is exactly what a
+    # lecturer who skips the .txt looks like, and Whisper never writes one file
+    # without the other, so PROVIDED is the safe read for it.
+    if ours_vtt in siblings and ours_txt in siblings:
+        return {"status": GENERATED, "sources": [ours_vtt, ours_txt]}
+    provided = [name for name in siblings if _is_transcript_name(name, stem_low)]
+    if provided:
+        return {"status": PROVIDED, "sources": provided}
+    return {"status": MISSING, "sources": []}
+
+
+def classify_drive_media(files: List[Dict]) -> List[Dict]:
+    """Media already archived in Drive, with transcript provenance - survey()'s
+    counterpart for files move mode has already deleted the local copy of.
+
+    ``files`` is an already-fetched flat listing shaped like
+    ``drive.DriveMirror.list_files()`` (id, name, rel_path, mime_type, size,
+    modified) - typically the dashboard's own cached Drive index, or one
+    ``transcribe_run.py --backfill`` fetches itself. This never talks to Drive on
+    its own, so calling it costs nothing beyond whatever already produced
+    ``files``. Detection only: pulling a result back, transcribing it, and
+    uploading the output is ``transcribe_run.py --backfill``, not this function.
+    """
+    by_dir: Dict[str, Dict[str, Dict]] = {}
+    for f in files:
+        directory = os.path.dirname(f.get("rel_path") or "")
+        by_dir.setdefault(directory, {})[f["name"]] = f
+
+    out: List[Dict] = []
+    for f in files:
+        if not is_media(f["name"]):
+            continue
+        directory = os.path.dirname(f.get("rel_path") or "")
+        siblings = by_dir.get(directory, {})
+        info = _drive_transcript_status(siblings, f["name"])
+        out.append({
+            "drive_id": f["id"],
+            "rel_path": f.get("rel_path") or f["name"],
+            "name": f["name"],
+            "size": int(f.get("size") or 0),
+            "modified": f.get("modified"),
+            "status": info["status"],
+            "sources": info["sources"],
+            "location": "drive",
+        })
+    return sorted(out, key=lambda e: e["rel_path"].lower())
 
 
 def _timestamp(seconds: float) -> str:

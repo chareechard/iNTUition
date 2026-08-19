@@ -1,7 +1,8 @@
+import json
+import os
 import re
 from typing import List, Optional, Tuple, Union, Dict
 from urllib.parse import parse_qs, urlencode, urlparse
-import json
 
 import bs4
 import requests
@@ -21,6 +22,7 @@ from ntu_learn_downloader.constants import (
 from ntu_learn_downloader import semester
 from ntu_learn_downloader.auth import AuthenticationError, HOW_TO_GET_TOKEN
 from ntu_learn_downloader.utils import (
+    REQUEST_TIMEOUT,
     get_content_id_from_listContent_url,
     is_download_link,
     make_GET_request,
@@ -45,14 +47,14 @@ def authenticate(username: str, password: str) -> str:
     instead. Raises AuthenticationError with instructions.
     """
     raise AuthenticationError(
-        "Username/password login is no longer supported by NTULearn.\n\n"
+        "Username/password login is no longer supported by iNTUition.\n\n"
         + HOW_TO_GET_TOKEN
     )
 
 
 def _authenticate_adfs_legacy(username: str, password: str) -> str:
     """Historical ADFS SSO flow, retained for reference only. Does not work against
-    the current NTULearn deployment.
+    the current iNTUition deployment.
 
     Hit the following endpoints:
     1. GET https://loginfs.ntu.edu.sg/adfs/ls/ to get blank BbRouter
@@ -125,10 +127,51 @@ SCOPE_FAVOURITES = "favourites"  # courses starred in Ultra
 SCOPES = (SCOPE_SEMESTER, SCOPE_FAVOURITES)
 
 
+def load_excluded_courses(download_root: str = ".") -> List[str]:
+    """Load list of course patterns to exclude from sync."""
+    filepath = os.path.join(download_root, ".ntu_learn_downloader", "excluded_courses.json")
+    if os.path.isfile(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+    # Default initial exclusions
+    return ["ML0004(T087)", "26S1-ML0004-CAREER DESIGN & WKPL READINESS (T087)"]
+
+
+def save_excluded_courses(excluded: List[str], download_root: str = "."):
+    """Persist excluded course patterns."""
+    folder = os.path.join(download_root, ".ntu_learn_downloader")
+    os.makedirs(folder, exist_ok=True)
+    filepath = os.path.join(folder, "excluded_courses.json")
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(excluded, f, indent=2)
+
+
+def is_course_excluded(course_name: str, download_root: str = ".") -> bool:
+    """Return True if course_name matches any excluded course pattern."""
+    excluded = load_excluded_courses(download_root)
+    norm_name = course_name.upper()
+    for rule in excluded:
+        rule_upper = rule.upper().strip()
+        if not rule_upper:
+            continue
+        if rule_upper in norm_name:
+            return True
+        tokens = [t.strip("()[]") for t in rule_upper.replace("-", " ").split() if t.strip("()[]")]
+        if tokens and len(tokens) >= 2 and all(t in norm_name for t in tokens):
+            return True
+    return False
+
+
 def get_courses(
     BbRouter: str, prefer_rest: bool = True, favorites_only: bool = None,
     scope: str = SCOPE_SEMESTER,
     today=None, include_undated: bool = False,
+    download_root: str = ".",
 ) -> List[Tuple[str, str]]:
     """Return the courses in scope, as [(course name, course_id)].
 
@@ -156,10 +199,13 @@ def get_courses(
         raise ValueError("Unknown scope {!r}, expected one of {}".format(scope, SCOPES))
 
     def narrow(courses):
-        if scope != SCOPE_SEMESTER:
-            return courses
         kept = []
         for name, cid in courses:
+            if is_course_excluded(name, download_root=download_root):
+                continue
+            if scope != SCOPE_SEMESTER:
+                kept.append((name, cid))
+                continue
             parsed = semester.parse_course_semester(name)
             if parsed == semester.current_semester(today):
                 kept.append((name, cid))
@@ -186,6 +232,13 @@ def get_courses(
                             semester.format_semester(semester.current_semester(today)),
                             len(courses)))
                 return narrowed
+        except rest.RestSessionExpired as e:
+            # The scraper authenticates with this same BbRouter cookie, so retrying
+            # against it cannot succeed - it would just return an empty course list
+            # and hide the fact that the token needs to be refreshed.
+            raise AuthenticationError(
+                "Your NTU Learn session token was rejected ({}).\n\n{}"
+                .format(e, HOW_TO_GET_TOKEN))
         except (rest.RestUnavailable, requests.RequestException, ValueError) as e:
             if scope == SCOPE_FAVOURITES:
                 # The scraper has no notion of a starred course, so falling back would
@@ -233,6 +286,7 @@ def get_courses_legacy(BbRouter: str) -> List[Tuple[str, str]]:
         headers=headers,
         params=params,  # type: ignore
         cookies=cookies,
+        timeout=REQUEST_TIMEOUT,
     )
 
     # parse response
@@ -381,12 +435,19 @@ def get_download_dir(
             )
             if skipped:
                 print(
-                    "  note: {} externally hosted item(s) cannot be downloaded "
-                    "(Zoom/Panopto/Kaltura links etc.): {}".format(
+                    "  note: {} item(s) yielded no files - externally hosted "
+                    "(Zoom/Panopto/Kaltura) or access denied: {}".format(
                         len(skipped), ", ".join(skipped[:5])
                     )
                 )
             return folder
+        except rest.RestSessionExpired as e:
+            # Same cookie, same rejection - the scraper fallback below cannot
+            # succeed either, so don't let it mask the auth failure with an
+            # empty-looking result.
+            raise AuthenticationError(
+                "Your NTU Learn session token was rejected ({}).\n\n{}"
+                .format(e, HOW_TO_GET_TOKEN))
         except (rest.RestUnavailable, requests.RequestException, ValueError) as e:
             print("  REST listing unavailable ({}), falling back to scraper".format(e))
 
@@ -425,7 +486,7 @@ def get_download_dir_legacy(BbRouter: str, course_name: str, course_id: str):
         Folder(
             name=content_name,
             link=None,
-            details="{} folder. Generated by NTULearn Downloader".format(content_name),
+            details="{} folder. Generated by iNTUition".format(content_name),
             children=get_contents(BbRouter, course_id, content_id),
         )
         for content_name, content_id in content_names_ids
@@ -434,7 +495,7 @@ def get_download_dir_legacy(BbRouter: str, course_name: str, course_id: str):
     folder = Folder(
         name=course_name,
         link=None,
-        details="Top level folder for {}. Generated by NTULearn Downloader".format(
+        details="Top level folder for {}. Generated by iNTUition".format(
             course_name
         ),
         children=children,

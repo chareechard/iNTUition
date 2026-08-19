@@ -1,12 +1,12 @@
 """One hardened way to call the Claude Code CLI non-interactively.
 
-Canonical source. Vendored into sibling projects that need the same guarantees -
-see ``VENDOR_TARGETS`` and ``tools/check_vendored.py``. Two callers today:
+Canonical source. Can be vendored into sibling projects that need the same
+guarantees - see ``VENDOR_TARGETS`` and ``tools/check_vendored.py``. Two callers
+today, both in this package:
 
-* iNTUition's R&D research (``research.py``) - web-enabled, may read staged
-  course material.
-* Cerberus email triage (``cerberus/src/ai_analyzer.py``) - no tools at all,
-  schema-constrained, and fed untrusted third-party email bodies.
+* Research backend (``research.py``) - web-enabled, may read staged course material.
+* Email triage (``triage.py``) - no tools at all, schema-constrained, and fed
+  untrusted third-party email bodies.
 
 The reason this exists in one file: the flags below are a **security boundary**,
 not a convenience. A prompt built from content you did not write - an email body,
@@ -32,7 +32,10 @@ DEFAULT_TIMEOUT = 600
 DEFAULT_MAX_USD = 1.00
 
 # Projects carrying a vendored copy of this file, relative to this repo's parent.
-VENDOR_TARGETS = ("J.A.R.V.I.S/cerberus/src/claude_bridge.py",)
+# Empty since triage moved in-package: both callers now import this module
+# directly, so there is no copy that can drift. Kept because the check is what
+# makes vendoring safe if a future sibling ever needs one.
+VENDOR_TARGETS = ()
 
 
 class BridgeError(Exception):
@@ -45,6 +48,20 @@ def binary() -> str:
 
 def present(cli: str = "") -> bool:
     return shutil.which(cli or DEFAULT_BINARY) is not None
+
+
+def no_window() -> int:
+    """Creation flags that keep a console child from stealing a window.
+
+    The CLI is a console-subsystem executable. Spawned from the packaged
+    desktop shell - which PyInstaller builds windowed, with no console of its
+    own - Windows allocates a fresh console for it, so every research or triage
+    run flashes an empty terminal on top of the app. CREATE_NO_WINDOW is the
+    documented way to say the child needs no console of its own; stdout and
+    stderr are captured through pipes regardless. Zero elsewhere, where the flag
+    does not exist and no console is ever allocated.
+    """
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def build_command(
@@ -140,7 +157,8 @@ def run(
                         prompt_on_stdin=prompt_on_stdin)
     call = runner or subprocess.run
     kwargs = dict(capture_output=True, text=True, cwd=cwd, timeout=timeout,
-                  encoding="utf-8", errors="replace")
+                  encoding="utf-8", errors="replace",
+                  creationflags=no_window())
     if prompt_on_stdin:
         kwargs["input"] = prompt
 

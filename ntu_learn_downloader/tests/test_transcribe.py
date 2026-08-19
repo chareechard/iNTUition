@@ -238,5 +238,73 @@ class TestTranscriptProvenance(unittest.TestCase):
             self.assertEqual(transcribe.survey(d), [])
 
 
+class TestClassifyDriveMedia(unittest.TestCase):
+    """The Drive-hosted counterpart of survey()/transcript_status() - move mode has
+    already deleted the local copy, so this is the only place left to detect it."""
+
+    def _file(self, name, rel_path, size=1000, mime="video/mp4"):
+        return {"id": "id-" + rel_path, "name": name, "rel_path": rel_path,
+                "mime_type": mime, "size": size, "modified": "2026-01-01T00:00:00Z"}
+
+    def test_missing_when_nothing_beside_it(self):
+        files = [self._file("Lecture 1.mp4", "CE2003/Lecture 1.mp4")]
+        media = transcribe.classify_drive_media(files)
+        self.assertEqual(len(media), 1)
+        self.assertEqual(media[0]["status"], transcribe.MISSING)
+        self.assertEqual(media[0]["location"], "drive")
+        self.assertEqual(media[0]["drive_id"], "id-CE2003/Lecture 1.mp4")
+
+    def test_course_supplied_vtt_is_provided(self):
+        files = [
+            self._file("Lecture 1.mp4", "CE2003/Lecture 1.mp4"),
+            self._file("Lecture 1.vtt", "CE2003/Lecture 1.vtt", mime="text/vtt"),
+        ]
+        media = transcribe.classify_drive_media(files)
+        self.assertEqual(media[0]["status"], transcribe.PROVIDED)
+        self.assertIn("Lecture 1.vtt", media[0]["sources"])
+
+    def test_our_own_vtt_and_txt_pair_is_generated(self):
+        files = [
+            self._file("Lecture 1.mp4", "CE2003/Lecture 1.mp4"),
+            self._file("Lecture 1.vtt", "CE2003/Lecture 1.vtt", mime="text/vtt"),
+            self._file("Lecture 1.txt", "CE2003/Lecture 1.txt", mime="text/plain"),
+        ]
+        media = transcribe.classify_drive_media(files)
+        self.assertEqual(media[0]["status"], transcribe.GENERATED)
+        self.assertEqual(set(media[0]["sources"]), {"Lecture 1.vtt", "Lecture 1.txt"})
+
+    def test_only_a_vtt_with_no_matching_txt_is_provided_not_generated(self):
+        """A lone .vtt could be ours (upload interrupted after one file) or a
+        lecturer's - without downloading to check the marker, treating it as
+        provided is the safe direction: it skips a re-transcribe rather than risk
+        clobbering someone else's captions."""
+        files = [
+            self._file("Lecture 1.mp4", "CE2003/Lecture 1.mp4"),
+            self._file("Lecture 1.vtt", "CE2003/Lecture 1.vtt", mime="text/vtt"),
+        ]
+        media = transcribe.classify_drive_media(files)
+        self.assertEqual(media[0]["status"], transcribe.PROVIDED)
+
+    def test_different_folders_do_not_cross_contaminate(self):
+        files = [
+            self._file("Lecture 1.mp4", "CE2003/Lecture 1.mp4"),
+            self._file("Lecture 1.vtt", "CZ2006/Lecture 1.vtt", mime="text/vtt"),
+        ]
+        media = transcribe.classify_drive_media(files)
+        self.assertEqual(media[0]["status"], transcribe.MISSING)
+
+    def test_non_media_files_are_excluded(self):
+        files = [self._file("Notes.pdf", "CE2003/Notes.pdf", mime="application/pdf")]
+        self.assertEqual(transcribe.classify_drive_media(files), [])
+
+    def test_sorted_by_rel_path(self):
+        files = [
+            self._file("B.mp4", "CE2003/B.mp4"),
+            self._file("A.mp4", "CE2003/A.mp4"),
+        ]
+        media = transcribe.classify_drive_media(files)
+        self.assertEqual([m["rel_path"] for m in media], ["CE2003/A.mp4", "CE2003/B.mp4"])
+
+
 if __name__ == "__main__":
     unittest.main()

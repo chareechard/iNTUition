@@ -1,6 +1,6 @@
 # URLs for authentication
 #
-# NOTE (2026): NTU moved NTULearn from a self-hosted Blackboard Learn Original install
+# NOTE (2026): NTU moved iNTUition from a self-hosted Blackboard Learn Original install
 # behind ADFS to Blackboard Learn SaaS (4000.x, Ultra base navigation) behind Microsoft
 # Entra ID. The ADFS endpoints below are kept only so the legacy authenticate() flow can
 # report a precise error; they are no longer part of NTU's login chain.
@@ -10,7 +10,7 @@ NTULEARN_URL = "https://ntulearn.ntu.edu.sg"
 NTULEARN_AUTH_SAML_URL = "https://ntulearn.ntu.edu.sg/auth-saml/saml/login?apId=_4980_1&redirectUrl=https%3A%2F%2Fntulearn.ntu.edu.sg%2Fultra"
 SAML_SSO_URL = "https://ntulearn.ntu.edu.sg/auth-saml/saml/SSO"
 
-# Legacy ADFS identity provider - decommissioned from the NTULearn login chain.
+# Legacy ADFS identity provider - decommissioned from the iNTUition login chain.
 LOGINFS_HOSTNAME = "https://loginfs.ntu.edu.sg"
 LOGINFS_URL = LOGINFS_HOSTNAME + "/adfs/ls/"
 
@@ -37,6 +37,7 @@ REST_BASE_URL = NTULEARN_URL + "/learn/api/public"
 REST_VERSION_URL = REST_BASE_URL + "/v1/system/version"
 REST_MY_COURSES_URL = REST_BASE_URL + "/v1/users/me/courses"
 REST_ME_URL = REST_BASE_URL + "/v1/users/me"
+REST_CALENDAR_ITEMS_URL = REST_BASE_URL + "/v1/calendars/items"
 
 # Ultra's *internal* API. Not part of the documented public contract, but it is the only
 # place the Favourites (starred courses) flag is exposed - the public

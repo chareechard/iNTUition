@@ -1,20 +1,20 @@
-"""Read Cerberus's flagged-email list, so deadlines land next to the timetable.
+"""Render the flagged-email list, so deadlines land next to the timetable.
 
-Cerberus (the J.A.R.V.I.S email triage) already watches NTU senders - the
-scholarships team, SPMS, URECA - and flags mail that needs action. iNTUition
-already shows the teaching week and what is on today. Those belong on one screen.
+``triage`` watches NTU senders - the scholarships team, SPMS, URECA - and flags
+mail that needs action. iNTUition already shows the teaching week and what is on
+today. Those belong on one screen.
 
-The coupling is deliberately the weakest kind available:
+This is the read half, and it stays deliberately narrow:
 
 * **Read-only, and enforced.** The database is opened with SQLite's ``mode=ro``
-  URI, so a bug here cannot mark something done or delete a row. Cerberus stays
-  the only writer of its own state.
-* **One direction.** iNTUition imports nothing from Cerberus and vice versa; the
-  file path is the entire interface. Cerberus not being installed is the normal
-  case, not an error - the panel simply does not appear.
+  URI, so a bug on a dashboard poll cannot mark something done or delete a row.
+  ``triage_store`` stays the only writer.
+* **One direction.** The file path is the entire interface, so any store in this
+  shape can be pointed at with ``--inbound_db``. No store yet is the normal case,
+  not an error - the panel simply does not appear until the first scan.
 * **No body text.** Subject, sender, priority and the one-line reason are enough
-  to decide whether to open the mail. Email bodies are not copied into this
-  process, and nothing here reaches the research backend.
+  to decide whether to open the mail. Email bodies stay in the triage process
+  that read them, and nothing here reaches the research backend.
 """
 import json
 import os
@@ -23,10 +23,7 @@ import sqlite3
 import time
 from typing import Dict, List, Optional
 
-# Cerberus lives beside this project by default; both are checked out under one
-# Projects directory. Override with INTUITION_CERBERUS_DB.
-DEFAULT_RELATIVE = os.path.join(
-    "J.A.R.V.I.S", "cerberus", "storage", "flagged.db")
+ENV_VAR = "INTUITION_INBOUND_DB"
 
 PRIORITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3,
                   "False Positive": 4}
@@ -37,33 +34,25 @@ def resolve_path(download_root: Optional[str] = None,
                  configured: Optional[str] = None) -> str:
     """Which store to read, in order of authority.
 
-    iNTUition's own triage store wins when it exists: once this project is doing the
-    triaging, the Cerberus database is the legacy one. An explicit path beats both,
-    which is what makes the changeover a flag rather than a migration.
+    An explicit path beats the environment, which beats this project's own store.
+    That ordering is what lets another store in the same shape be pointed at
+    without a migration.
     """
     if configured:
         return configured
-    env = (os.environ.get("INTUITION_CERBERUS_DB") or "").strip()
+    env = (os.environ.get(ENV_VAR) or "").strip()
     if env:
         return env
-    if download_root:
-        from ntu_learn_downloader import triage_store
-        own = triage_store.db_path(download_root)
-        if os.path.isfile(own):
-            return own
-    return default_path()
+    return default_path(download_root)
 
 
-def default_path(projects_dir: Optional[str] = None) -> str:
-    """Where to look when nothing is configured."""
-    env = (os.environ.get("INTUITION_CERBERUS_DB") or "").strip()
+def default_path(download_root: Optional[str] = None) -> str:
+    """This project's own triage store, beneath the sync folder."""
+    env = (os.environ.get(ENV_VAR) or "").strip()
     if env:
         return env
-    if projects_dir is None:
-        # .../Projects/NTULearn-Downloader/ntu_learn_downloader/inbound.py
-        projects_dir = os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(projects_dir, DEFAULT_RELATIVE)
+    from ntu_learn_downloader import triage_store
+    return triage_store.db_path(download_root or ".")
 
 
 def available(path: Optional[str] = None) -> bool:
@@ -86,7 +75,7 @@ def _first_sentence(text: str, limit: int = 90) -> str:
 
 
 def _actions(value) -> List[str]:
-    """Cerberus stores this as a JSON array; tolerate a plain string too."""
+    """Stored newline-joined, but tolerate a JSON array or a bare string too."""
     if isinstance(value, list):
         return [str(a).strip() for a in value if str(a).strip()]
     text = str(value or "").strip()
@@ -114,9 +103,9 @@ def _row_to_flag(row: sqlite3.Row) -> Dict:
         "id": get("email_id"),
         "sender": get("sender"),
         "subject": subject,
-        # Cerberus's scraper currently stores an empty subject for most rows, so a
-        # row identified only by sender would be unreadable. The matched snippet is
-        # the evidence it flagged on and makes a serviceable stand-in.
+        # OWA's reading pane does not always yield a subject, so a row identified
+        # only by sender would be unreadable. The matched snippet is the evidence
+        # it was flagged on and makes a serviceable stand-in.
         "title": subject or _first_sentence(snippet) or "(no subject captured)",
         "priority": get("priority", "Medium"),
         "confidence": _as_float(get("confidence")),
@@ -124,6 +113,7 @@ def _row_to_flag(row: sqlite3.Row) -> Dict:
         "reason": get("reasoning"),
         "snippet": snippet,
         "flagged_at": get("flagged_at"),
+        "due": get("due"),
         "link": get("link"),
         # Deliberately absent: body_content.
     }
@@ -132,7 +122,7 @@ def _row_to_flag(row: sqlite3.Row) -> Dict:
 def open_flags(path: Optional[str] = None, limit: int = MAX_ROWS) -> List[Dict]:
     """Open flags, most urgent first. Any failure yields an empty list.
 
-    Cerberus may be mid-write, the file may be locked, an older schema may lack a
+    A scan may be mid-write, the file may be locked, an older schema may lack a
     column - none of that is worth failing a dashboard poll over.
     """
     path = path or default_path()
@@ -153,10 +143,47 @@ def open_flags(path: Optional[str] = None, limit: int = MAX_ROWS) -> List[Dict]:
         return []
 
     flags = [_row_to_flag(r) for r in rows]
-    # Urgency beats recency: a Critical from Tuesday outranks a Medium from today.
-    flags.sort(key=lambda f: (PRIORITY_ORDER.get(f["priority"], 9),
-                              f["flagged_at"] or ""))
+    # Stable passes compose unlike a single ascending tuple: urgency first, then
+    # newest-first within each priority band.
+    flags.sort(key=lambda f: f["flagged_at"] or "", reverse=True)
+    flags.sort(key=lambda f: PRIORITY_ORDER.get(f["priority"], 9))
     return flags[:limit]
+
+
+def _scan_meta(path: str) -> Dict:
+    """Latest scan telemetry; older compatible databases simply return none."""
+    try:
+        conn = sqlite3.connect("file:{}?mode=ro".format(path.replace("\\", "/")),
+                               uri=True, timeout=2.0)
+        try:
+            row = conn.execute(
+                "SELECT value FROM triage_meta WHERE key='last_scan'").fetchone()
+        finally:
+            conn.close()
+        value = json.loads(row[0]) if row else {}
+        return value if isinstance(value, dict) else {}
+    except (sqlite3.Error, ValueError, TypeError):
+        return {}
+
+
+def _group(flags: List[Dict]) -> List[Dict]:
+    """Collapse repeated opportunity emails in the view without deleting evidence."""
+    grouped: List[Dict] = []
+    by_key: Dict[tuple, Dict] = {}
+    for flag in flags:
+        label = flag.get("subject") or flag.get("title") or ""
+        label = re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
+        sender = re.sub(r"\s+", " ", str(flag.get("sender") or "").lower()).strip()
+        key = (label, sender, flag.get("due") or "") if label else (flag["id"], "", "")
+        existing = by_key.get(key)
+        if existing is None:
+            item = dict(flag, ids=[flag["id"]], duplicate_count=1)
+            by_key[key] = item
+            grouped.append(item)
+        else:
+            existing["ids"].append(flag["id"])
+            existing["duplicate_count"] += 1
+    return grouped
 
 
 _CACHE: Dict[str, tuple] = {}
@@ -167,7 +194,7 @@ def snapshot(path: Optional[str] = None, ttl: float = CACHE_SECONDS) -> Dict:
     """What the dashboard renders, including why the panel is empty when it is.
 
     Cached briefly: the dashboard polls twice a second and this opens a database.
-    Triage runs on a 90-second cycle, so a few seconds of staleness is invisible.
+    Flags change only when a scan runs, so a few seconds of staleness is invisible.
     """
     path = path or default_path()
     hit = _CACHE.get(path)
@@ -181,14 +208,21 @@ def snapshot(path: Optional[str] = None, ttl: float = CACHE_SECONDS) -> Dict:
 
 def _build(path: str) -> Dict:
     present = os.path.isfile(path)
-    flags = open_flags(path) if present else []
+    # Grouped and counted before the row cap - "total" describes how many open
+    # flags actually exist, not just how many fit in the panel. Without this
+    # split, a busy inbox silently loses everything past MAX_ROWS with no sign
+    # anything is missing.
+    grouped = _group(open_flags(path, limit=1000)) if present else []
+    flags = grouped[:MAX_ROWS]
     counts: Dict[str, int] = {}
-    for f in flags:
+    for f in grouped:
         counts[f["priority"]] = counts.get(f["priority"], 0) + 1
     return {
         "available": present,
         "path": path,
         "flags": flags,
         "counts": counts,
-        "total": len(flags),
+        "total": len(grouped),
+        "shown": len(flags),
+        "scan": _scan_meta(path) if present else {},
     }
