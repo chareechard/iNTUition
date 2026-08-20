@@ -1,7 +1,7 @@
 """Validate FRIDAY's read of a Lab file into a safe-to-render algorithm blueprint.
 
-Same posture as graphing.py: the model's JSON describes arbitrary student
-code and is untrusted output, not a value to hand straight to the page.
+The model's JSON describes arbitrary student code and is untrusted output,
+not a value to hand straight to the page.
 Every field is shape- and range-checked before it reaches the dashboard;
 anything that doesn't fit is dropped rather than passed through. The
 "steps" list is this module's own extension to the brief's JSON contract -

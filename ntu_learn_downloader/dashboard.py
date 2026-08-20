@@ -50,10 +50,12 @@ from ntu_learn_downloader import schedule as schedule_mod
 from ntu_learn_downloader import todo as todo_mod
 from ntu_learn_downloader import announcements as announcements_mod
 from ntu_learn_downloader import ai_provider
-from ntu_learn_downloader import graphing as graphing_mod
 from ntu_learn_downloader import omniroute_provider
 from ntu_learn_downloader import lab as lab_mod
 from ntu_learn_downloader import lab_analysis as lab_analysis_mod
+from ntu_learn_downloader import ureca as ureca_mod
+from ntu_learn_downloader import profile as profile_mod
+from ntu_learn_downloader import saved_topics as saved_topics_mod
 from ntu_learn_downloader.chat_memory import ChatMemory
 from ntu_learn_downloader.notes import Notebook, NoteConflict, html_to_text
 from ntu_learn_downloader.sync import (
@@ -71,12 +73,6 @@ ANNOUNCEMENT_SYNC_HOURS = (7, 23)
 INBOUND_POLL_SECONDS = 12 * 60 * 60
 DRIVE_LEARNING_SYSTEM = """You are FRIDAY, a careful university learning assistant. Answer from the supplied course material. Explain concepts clearly and distinguish what the material states from your own explanation. If the material does not support the answer, say so instead of inventing details. Default to a focused answer under 450 words with at most one worked example; expand only when the student explicitly requests depth. Compare the concepts the student actually names and correct a misleading premise tactfully. Allowed output is explanatory Markdown with headings, lists, compact tables, short quotations, code blocks, equations, worked examples, summaries, flashcards, and revision questions. Use blank lines around headings, quotations, lists, tables, and display equations. Write inline mathematics as \\( ... \\) and display mathematics as \\[ ... \\]; do not use dollar-sign delimiters. Never claim to modify files, submit coursework, browse private systems, or execute actions; you only return learning content."""
 
-# Deliberately narrow: this reads a page for graphable functions, nothing else.
-# The response is untrusted input that ntu_learn_downloader.graphing validates
-# against a closed allowlist before it ever reaches GeoGebra's evalCommand, but
-# a tighter prompt means less for that validator to have to reject.
-GRAPH_SYSTEM = """You read a screenshot of one page from a student's course material and report ONLY the explicit mathematical function(s) it defines, so they can be graphed automatically. Respond with strict JSON and nothing else - no prose, no markdown fences, no explanation. Schema: {"functions": [{"expr": "<algebraic expression in x, or in x and y>", "vars": ["x"] or ["x","y"]}], "domain": [<min>,<max>], "range": [<min>,<max>]}. Use "vars":["x"] for a single-variable function f(x) and "vars":["x","y"] for a surface f(x,y). "expr" must be plain algebra using only digits, x, y, + - * / ^ ( ) , . and the named functions sin cos tan asin acos atan sinh cosh tanh sqrt exp ln log abs floor ceil pi e - never GeoGebra commands, scripting, or any other identifier. Read "domain" and "range" from any interval explicitly stated on the page (for example "for x in [-2,2]"); omit them if none is stated. If the page names no explicit function to graph, respond exactly {"functions": []}. Never invent a function the page does not state."""
-GRAPH_PROMPT = "Read the attached page and report any explicit function(s) to graph, per your instructions."
 
 # lab_analysis.py validates every field below before it reaches the page - a
 # tighter prompt just means less for that validator to have to reject. The
@@ -85,6 +81,28 @@ GRAPH_PROMPT = "Read the attached page and report any explicit function(s) to gr
 # Simulation tab's Play/Step/Speed timeline, so the model additionally
 # mentally traces its own execution into a short operation log.
 LAB_BLUEPRINT_SYSTEM = """You are FRIDAY, reading one source file open in a student's local Python/Java IDE. Identify the primary algorithm it implements and respond with strict JSON only - no prose, no markdown fences, no explanation. Schema: {"detectedAlgorithm": "<name, e.g. Dijkstra's Shortest Path, QuickSort, Bubble Sort, Binary Search - or \\"Not identified\\" if the file implements no recognizable algorithm>", "paradigm": "<e.g. Greedy, Divide and Conquer, Dynamic Programming, Brute Force, Backtracking - or \\"Unknown\\">", "timeComplexity": "<Big-O in terms of the code's own variable names, e.g. O(N log N) - or \\"Unknown\\">", "spaceComplexity": "<Big-O - or \\"Unknown\\">", "criticalLines": [{"line": <1-based line number from the numbered source below>, "purpose": "<short explanation of that line's operational importance>"}] (at most 8, only the lines that matter most - never invent a line number outside the file), "simulationModel": {"type": "\\"array\\", \\"graph\\", \\"tree\\" or \\"none\\"", "initialState": <for "array": the JSON array of starting values the code operates on; for "graph"/"tree": {"nodes": [...], "edges": [{"from":..., "to":..., "weight":...}]}; use null with type "none" if nothing in the file has a structure worth animating>}, "steps": [<at most 60 steps tracing the algorithm's own execution against simulationModel.initialState, each either {"op":"compare","indices":[i,j],"line":<n>}, {"op":"swap","indices":[i,j],"line":<n>}, {"op":"set","indices":[i],"value":<v>,"line":<n>}, {"op":"visit","node":"<id>","line":<n>}, or {"op":"edge","from":"<id>","to":"<id>","weight":<w>,"line":<n>} - omit "steps" entirely (or leave it empty) if simulationModel.type is "none" or you cannot trace real execution>]}. Base every field only on what the code in front of you actually does; never invent an algorithm, complexity, or step the code does not support."""
+
+# ureca.py validates every field below before it reaches the store - draft
+# text is a starting point for the student to edit, never a finished
+# proposal, so the model is told to stay modest and never invent specifics.
+# Runs on the "scholar" tier (see ai_provider.TIERS) rather than "chat": this
+# is a single deep autonomous pass over the whole proposal, not a quick
+# reformat, so it gets the slower, stronger rung and a longer deadline.
+URECA_DRAFT_SYSTEM = """You are doing autonomous research for an NTU undergraduate who gave you a one-line idea and needs a first-draft URECA (Undergraduate Research Experience on CAmpus) project proposal. URECA is NTU's self-proposed undergraduate research programme: a student drafts a proposal, a faculty supervisor accepts and registers it, and the student spends the August-to-June academic year on the project, finishing with an abstract, a poster and a final paper; consumable spending is capped at $500. Think like a researcher scoping a feasible undergraduate project, not a copywriter padding out a summary: reason about what makes this idea tractable in about 11 months, what a realistic method looks like, and what could plausibly go wrong or be out of scope. Respond with strict JSON only - no prose, no markdown fences, no explanation. Schema: {"background": "<2-4 sentences: the problem or gap and why it matters, grounded only in what the student described>", "objectives": "<2-4 concrete, checkable research objectives, written as short sentences>", "methodology": "<3-5 sentences: a specific, realistic approach an undergraduate could carry out over about 11 months - name concrete methods, tools or data sources where you can>", "outcomes": "<2-3 sentences: the expected contribution, tied to URECA's own deliverables of an abstract, poster and final paper>", "budgetNotes": "<1-3 sentences: what consumables or small costs this plausibly needs, staying within the $500 cap - say \\"No consumables anticipated\\" if none>", "timelineNotes": "<2-4 sentences: a rough month-by-month or phase-by-phase plan spanning August to June>"}. Write a first draft the student can edit, not a finished document - stay concrete, and never invent citations, data, prior results, or specifics the student did not mention. It is fine, and expected, to reason from general domain knowledge about feasibility and method - that is the research; just do not fabricate sources or claim specific prior findings you cannot support."""
+
+# The first, cheap step of the Research tab's autonomous flow: propose a short
+# list of candidate topics before any deep research runs. The student still
+# picks one explicitly (see /api/research action=suggest and the "Research
+# this" cards in the UI) - this only replaces having to type a title and a
+# one-line idea by hand, not the explicit press itself.
+RESEARCH_SUGGEST_ATTEMPTS = 2
+# NTU MACS (Mathematical and Computer Sciences) spans two departments; the
+# student has decided to approach Mathematics for supervision, so suggestions
+# should skew there rather than split evenly across the dual field. Expressed
+# as ratios of a typical batch (3-5 ideas) rather than a bare percentage,
+# because the model has to turn "70/30" into whole ideas, not a rule it can
+# satisfy by hedging every idea toward the middle.
+RESEARCH_SUGGEST_SYSTEM = """You propose URECA (Undergraduate Research Experience on CAmpus) project ideas for an NTU undergraduate, tailored to their programme, year and field of study. URECA is NTU's self-proposed undergraduate research programme: a student drafts a proposal, a faculty supervisor accepts and registers it, and the student spends the August-to-June academic year on the project, finishing with an abstract, a poster and a final paper; consumable spending is capped at $500. Propose ideas that are feasible for an undergraduate at their stated year to scope and complete in about 11 months, and that plausibly connect to courses in their field. If the student gave interests or keywords, treat them as the anchor for every idea - each one should visibly grow out of a keyword, not just gesture at the student's broader field, and none should drift onto a keyword-unrelated theme. Aim for a spread across the theory-to-application range rather than one register: avoid ideas so broad they could describe half the field, so purely theoretical they have no undergraduate-scale deliverable, and so applied they are just an engineering build with no research question. This student's field spans two departments, Mathematics and Computer Science, and they have decided to approach Mathematics for supervision - skew the batch about 70/30 toward it rather than splitting evenly: 3 of 4 ideas, or 3-4 of 5, should be grounded primarily in Mathematics (a proof, a model, an analytical or computational-maths question), with the rest primarily in Computer Science. Every idea should read as clearly belonging to one department or the other, not hedged into a blend of both, so the split is legible rather than nominal. Respond with strict JSON only - no prose, no markdown fences, no explanation. Schema: a JSON array of 3 to 5 objects, each {"title": "<a short, concrete project title, under 12 words>", "topic": "<one sentence pitching the idea, specific enough to hand straight to a research pass - not a vague theme>"}. Make the ideas genuinely different from each other in approach or subfield, not variations on one theme. Never invent a specific supervisor, dataset, or prior result; keep each idea grounded in the student's stated field and, if given, their keywords."""
 OMNIROUTE_WATCH_SECONDS = 15
 
 TODO_BACKENDS = ("auto", research_mod.BACKEND_OMNIROUTE, research_mod.BACKEND_CLI)
@@ -193,6 +211,9 @@ class State:
         self.notebook = Notebook(download_root)
         self.lab_workspace = lab_mod.Workspace(download_root)
         self.lab_jobs = lab_mod.JobManager()
+        self.ureca = ureca_mod.Store(download_root)
+        self.profile = profile_mod.Store(download_root)
+        self.saved_topics = saved_topics_mod.Store(download_root)
         self.announcements_syncing = False
         self.unified_syncing = False
         self.unified_sync_error = ""
@@ -236,6 +257,9 @@ class State:
             self.chat_memory = ChatMemory(root)
             self.notebook = Notebook(root)
             self.lab_workspace = lab_mod.Workspace(root)
+            self.ureca = ureca_mod.Store(root)
+            self.profile = profile_mod.Store(root)
+            self.saved_topics = saved_topics_mod.Store(root)
             # The plan describes files under the previous root; it means nothing here.
             self.plan = []
             self.media_survey = []
@@ -275,6 +299,7 @@ class State:
             "teaching_weeks": teaching_weeks,
             "all_week": self.schedule.dynamic_week(monday),
             "changes": list(self.schedule.overrides),
+            "important_dates": list(self.schedule.important_dates),
             "teaching_week": teaching_week,
             "phase": cal_mod.phase_of(now.date(), sem),
             "exams": self.schedule.exams,
@@ -473,6 +498,18 @@ def do_announcement_sync(state: State):
         # falling back here anyway.
         _schedule_backend = research_mod.BACKEND_CLI
         schedule_ai = research_mod.status(_schedule_backend)
+        if schedule_ai.get("ready"):
+            try:
+                events = state.announcements.detect_important_dates(
+                    preferred=_schedule_backend)
+                event_count = state.schedule.set_announcement_important_dates(events)
+                state.schedule.save()
+                state.note("Temporal Protocol updated from announcements: "
+                           "{} important date(s)".format(event_count))
+            except Exception as exc:
+                with state.lock:
+                    state.announcement_schedule_error = str(exc)
+                state.note("Announcement important-date detection failed: {}".format(exc))
         if state.schedule.sessions and schedule_ai.get("ready"):
             try:
                 try:
@@ -920,9 +957,15 @@ def do_generate_summary(state: State, job_id: str, item_id: str, prompt: str,
             pass
         with state.lock:
             if state.summary_job and state.summary_job["id"] == job_id:
+                # This except only ever catches a failure *before* summary_mod.generate()
+                # returns a result of its own - build_service()/pull_file() above, most
+                # often - so its own result.stage never gets a chance to run. The stage
+                # set_stage() last wrote is the only record of where it actually broke;
+                # a bare "generate" here would misreport a Drive failure as an AI one.
+                error_stage = state.summary_job.get("stage") or "generate"
                 state.summary_job.update({
                     "stage": "Failed", "ok": False, "done": True,
-                    "error_stage": "generate", "errors": [str(exc)],
+                    "error_stage": error_stage, "errors": [str(exc)],
                 })
         state.note("Compendium failed: {}".format(exc))
     finally:
@@ -1421,6 +1464,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send({"content": content})
             return
+        if path == "/api/research":
+            self._send(self.state.ureca.snapshot())
+            return
+        if path == "/api/profile":
+            self._send({"profile": self.state.profile.get()})
+            return
+        if path == "/api/research/saved":
+            self._send(self.state.saved_topics.snapshot())
+            return
         if path == "/api/notes":
             query = parse_qs(parsed.query)
             item_id = (query.get("id") or [""])[0]
@@ -1773,6 +1825,125 @@ class Handler(BaseHTTPRequestHandler):
             blueprint = lab_analysis_mod.parse_blueprint_response(
                 result.get("text") or "", line_count)
             self._send({"blueprint": blueprint, "backend": result.get("backend"),
+                        "model": result.get("model")})
+            return
+
+        if path == "/api/research":
+            action = payload.get("action")
+            try:
+                if action == "create":
+                    item = state.ureca.add(payload.get("title", ""))
+                elif action == "update":
+                    item = state.ureca.update(payload.get("id", ""), **{
+                        k: payload.get(k) for k in
+                        ("title", "category", "status") + ureca_mod.TEXT_FIELDS + ("deliverables",)})
+                    if item is None:
+                        self._send({"error": "no such proposal"}, status=404)
+                        return
+                elif action == "delete":
+                    if not state.ureca.remove(payload.get("id", "")):
+                        self._send({"error": "no such proposal"}, status=404)
+                        return
+                else:
+                    self._send({"error": "unknown action"}, status=400)
+                    return
+            except ValueError as exc:
+                self._send({"error": str(exc)}, status=400)
+                return
+            state.ureca.save()
+            self._send({"ok": True, "items": state.ureca.items})
+            return
+
+        if path == "/api/research/suggest":
+            prompt = "Student profile: {}".format(state.profile.summary())
+            codes = course_codes(state)
+            if codes:
+                prompt += "\nCourses this semester: {}".format(", ".join(codes))
+            # Typed fresh for this run when given, so it takes effect immediately -
+            # otherwise the profile's saved value, which the debounced autosave in
+            # rpKeywords may not have persisted yet if the student typed and pressed
+            # "Suggest topics" in the same breath.
+            keywords = str(payload.get("keywords") or "").strip()[:200] or state.profile.get()["keywords"]
+            if keywords:
+                prompt += "\nInterests / keywords to anchor ideas in: {}".format(keywords)
+            prompt += "\n---\nReport the JSON array of proposed ideas now."
+            # The "scholar" tier never ladders or falls back (see ai_provider.TIERS),
+            # so one off-format or degenerate reply would otherwise surface as "no
+            # topics found" after the student's single press. Unlike the deep draft
+            # pass this call is short and has no side effects until a suggestion is
+            # picked, so retrying it here a couple of times is cheap and safe.
+            suggestions, result, last_error = [], None, None
+            for _attempt in range(RESEARCH_SUGGEST_ATTEMPTS):
+                try:
+                    result = ai_provider.complete_tier(
+                        "scholar", prompt, RESEARCH_SUGGEST_SYSTEM,
+                        preferred=state.research_backend, max_tokens=3000,
+                        download_root=state.download_root)
+                except ai_provider.ProviderError as exc:
+                    last_error = exc
+                    result = None
+                    continue
+                suggestions = ureca_mod.parse_suggest_response(result.get("text") or "")
+                if suggestions:
+                    break
+            if result is None:
+                self._send({"error": str(last_error)}, status=502)
+                return
+            self._send({"suggestions": suggestions, "backend": result.get("backend"),
+                        "model": result.get("model")})
+            return
+
+        if path == "/api/profile":
+            item = state.profile.update(**{k: payload.get(k) for k in profile_mod.FIELDS})
+            state.profile.save()
+            self._send({"profile": item})
+            return
+
+        if path == "/api/research/saved":
+            action = payload.get("action")
+            try:
+                if action == "star":
+                    state.saved_topics.add(payload.get("title", ""), payload.get("topic", ""))
+                elif action == "unstar":
+                    if not state.saved_topics.remove(payload.get("id", "")):
+                        self._send({"error": "no such saved topic"}, status=404)
+                        return
+                else:
+                    self._send({"error": "unknown action"}, status=400)
+                    return
+            except ValueError as exc:
+                self._send({"error": str(exc)}, status=400)
+                return
+            state.saved_topics.save()
+            self._send(state.saved_topics.snapshot())
+            return
+
+        if path == "/api/research/draft":
+            item_id = str(payload.get("id") or "")
+            topic = str(payload.get("topic") or "").strip()[:600]
+            item = state.ureca.get(item_id)
+            if item is None:
+                self._send({"error": "no such proposal"}, status=404)
+                return
+            if not topic:
+                self._send({"error": "describe the idea in a sentence first"}, status=400)
+                return
+            prompt = "Project title: {}\nStudent's rough idea: {}\n---\nReport the JSON draft now.".format(
+                item.get("title") or "(untitled)", topic)
+            try:
+                result = ai_provider.complete_tier(
+                    "scholar", prompt, URECA_DRAFT_SYSTEM, preferred=state.research_backend,
+                    max_tokens=1800, download_root=state.download_root)
+            except ai_provider.ProviderError as exc:
+                self._send({"error": str(exc)}, status=502)
+                return
+            draft = ureca_mod.parse_draft_response(result.get("text") or "")
+            # Fills in only what the student hasn't already written - a
+            # second draft pass never clobbers an edit they've since made.
+            fill = {k: v for k, v in draft.items() if v and not (item.get(k) or "").strip()}
+            updated = state.ureca.update(item_id, **fill) if fill else item
+            state.ureca.save()
+            self._send({"item": updated, "backend": result.get("backend"),
                         "model": result.get("model")})
             return
 
@@ -2177,34 +2348,6 @@ class Handler(BaseHTTPRequestHandler):
                             "snapshot_note": snapshot_note})
             except Exception as exc:  # noqa: BLE001 - surface material/provider failures
                 self._send({"error": str(exc)}, status=500)
-            return
-
-        if path == "/api/drive/graph":
-            item_id = str(payload.get("id") or "")
-            snapshot = str(payload.get("snapshot") or "")
-            if (not snapshot.startswith("data:image/jpeg;base64,")
-                    or len(snapshot) > 3_000_000):
-                self._send({"error": "snapshot must be a JPEG under 2 MB"}, status=400)
-                return
-            if not item_id:
-                self._send({"error": "open a material first"}, status=400)
-                return
-            with state.lock:
-                item = next((dict(entry) for entry in state.drive_files
-                             if entry["id"] == item_id), None)
-            if not item:
-                self._send({"error": "material is not in the current Drive index"}, status=404)
-                return
-            try:
-                result = omniroute_provider.complete_image(
-                    GRAPH_PROMPT, GRAPH_SYSTEM, snapshot, max_tokens=400, timeout=90)
-            except omniroute_provider.OmniRouteError as exc:
-                self._send({"error": "Graphing needs vision, which is temporarily "
-                                     "unavailable: {}".format(exc)}, status=502)
-                return
-            spec = graphing_mod.parse_graph_response(result.get("text") or "")
-            self._send({"graph": spec, "backend": result.get("backend"),
-                        "model": result.get("model")})
             return
 
         if not state.token:

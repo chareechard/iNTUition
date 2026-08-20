@@ -65,7 +65,11 @@ body {
   transition:padding-left .2s ease;
 }
 :root { --material-drawer-width:min(720px,46vw); }
-body.materialOpen { padding-left:var(--material-drawer-width); }
+/* The drawer/chat overlay only visibility:hides the page behind it (below), which
+   keeps the page's full scroll height - without this, that leaves the underlying
+   page's own scrollbar sitting right next to each pane's overflow-y:auto scrollbar,
+   two redundant vertical scrollbars stacked at the same edge. */
+body.materialOpen { padding-left:var(--material-drawer-width); overflow:hidden; }
 
 /* ── Panel: thin frame with bright L-brackets at all four corners ───────────
    Eight gradients on one pseudo-element draws every corner without extra
@@ -166,10 +170,9 @@ main {
     "inbound  todo      temporal"
     "priority priority  priority"
     "courses  lab       manifest"
-    "drive    lab       transcribe"
-    "techie   techie    techie"
+    "drive    research  transcribe"
     "system   console   console";
-  grid-template-rows: repeat(7, auto);
+  grid-template-rows: repeat(6, auto);
   align-content: start;
 }
 @media (min-width: 901px) and (max-width: 1100px) {
@@ -181,9 +184,9 @@ main {
            "temporal  temporal"
            "priority  priority"
            "courses   lab"
-           "manifest  lab"
+           "manifest  techie"
            "drive     transcribe"
-           "techie    techie"
+           "research  research"
            "system    console";
          grid-template-rows: repeat(9, auto); }
 }
@@ -192,8 +195,8 @@ main {
      straight under the header, above everything operational. */
   main { grid-template-columns: minmax(0, 1fr); padding: 18px 14px 28px; gap: 18px;
          grid-template-areas: "gate" "temporal" "todo" "inbound" "priority"
-                              "courses" "lab" "manifest" "drive"
-                              "transcribe" "techie" "system" "console";
+                              "courses" "lab" "techie" "manifest" "drive"
+                              "transcribe" "research" "system" "console";
          grid-template-rows: none; }
 }
 #authSection   { grid-area: gate; }
@@ -208,7 +211,8 @@ main {
 #inboundPanel  { grid-area: inbound; align-self: start; min-width: 0; }
 #todoPanel     { grid-area: todo; align-self: start; min-width: 0; }
 #labPanel      { grid-area: lab; align-self: start; min-width: 0; }
-#techiePanel   { grid-area: techie; align-self: start; }
+#techiePanel   { grid-area: techie; align-self: start; min-width: 0; }
+#researchPanel { grid-area: research; align-self: start; min-width: 0; }
 #consolePanel  { grid-area: console; align-self: start; }
 
 /* Synchronized command rows: every panel sharing a row is bound to the same
@@ -219,20 +223,40 @@ main {
    for reflow jitter when dragging a window across 1101px. */
 @media (min-width: 1101px) {
   main {
-    grid-template-rows: auto var(--command-row-height, 400px) auto var(--command-row-height, 400px) auto auto auto;
+    grid-template-rows: auto var(--command-row-height, 400px) auto var(--command-row-height, 400px) auto auto;
   }
   /* Rows 2 and 4 are the fixed-height command rows, so the groups below track
      slot occupancy in grid-template-areas rather than panel identity. Move a
      panel between those rows and it has to change groups with it. */
-  #todoPanel, #inboundPanel, #temporalPanel, #coursePanel, #manifestPanel {
+  #todoPanel, #inboundPanel, #temporalPanel, #coursePanel, #manifestPanel,
+  #drivePanel, #transcribePanel, #researchPanel {
     height:100%; min-height:0; box-sizing:border-box;
     max-height:var(--command-row-height, 400px);
   }
-  #coursePanel, #temporalPanel {
+  /* Row 5 (drive/research/transcribe, techie moved out) is auto-height,
+     unlike row 4's fixed track - capping these here is what makes them
+     "follow" Course Nodes' length instead of growing the row to fit a long
+     transcode/push/proposal list. */
+  #coursePanel, #temporalPanel, #drivePanel, #transcribePanel, #researchPanel {
     overflow-y:auto; overflow-x:hidden;
   }
+  /* Techie Delight shares Lab's cell instead of getting a row of its own -
+     both are repositioned onto "lab"'s grid line numbers (row 4, column 2)
+     and each capped at half that cell's height (minus one row-gap's worth),
+     Lab pinned to the top via align-self:start and Techie to the bottom via
+     align-self:end - the leftover 12px between them lands exactly on the
+     row-gap every other pair of panels already gets for free. */
+  #labPanel, #techiePanel {
+    grid-row: 4; grid-column: 2;
+    height:calc((var(--command-row-height, 400px) - 12px) / 2);
+    max-height:calc((var(--command-row-height, 400px) - 12px) / 2);
+    min-height:0; box-sizing:border-box; overflow-y:auto; overflow-x:hidden;
+  }
+  #labPanel { align-self:start; }
+  #techiePanel { align-self:end; }
   #todoPanel > h2, #inboundPanel > h2, #temporalPanel > h2,
-  #coursePanel > h2, #manifestPanel > h2 {
+  #coursePanel > h2, #manifestPanel > h2, #drivePanel > h2, #transcribePanel > h2,
+  #labPanel > h2, #techiePanel > h2, #researchPanel > h2 {
     position:sticky; top:-14px; z-index:3; margin-left:-1px; margin-right:-1px;
     padding-top:14px; background:#07131d;
   }
@@ -244,7 +268,7 @@ main {
   #todoPanel .todoDrop > summary { position:sticky; top:0; z-index:2; background:var(--panel); }
   #todoPanel .todoList { height:auto; overflow:visible; }
   #inboundPanel #inboundList { flex:1 1 auto; min-height:0; max-height:none; }
-  #drivePanel, #transcribePanel, #systemPanel, #consolePanel {
+  #systemPanel, #consolePanel {
     height:100%; min-height:0; box-sizing:border-box;
   }
   #consolePanel { overflow:hidden; display:flex; flex-direction:column; }
@@ -332,10 +356,11 @@ body.materialResizing .materialChat, body.materialResizing .materialDrawer { tra
 .studyTab[aria-selected="true"] { color:#eaffff; border-color:var(--cyan); background:rgba(14,116,144,.22); }
 .studyPane { display:none; flex:1; min-height:0; flex-direction:column; }
 .studyPane.active { display:flex; }
-/* ── Multivariable surface dashboard (Graph tab) ─────────────────────────
+/* ── Multivariable surface dashboard (Telemetry tab, née Graph) ──────────
    Container query, not a viewport media query: this pane's real width is
    set by the resizable drawer, which can go narrow at any window size. */
 #graphPane { container-type:inline-size; overflow-y:auto; padding:16px clamp(16px,3vw,32px); }
+.surfaceStatusRow { display:flex; justify-content:flex-end; margin-bottom:12px; }
 .surfaceDash { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
 @container (max-width:640px) { .surfaceDash { grid-template-columns:1fr; } }
 .surfaceCol { display:flex; flex-direction:column; min-width:0; border:1px solid var(--line); background:rgba(6,15,23,.55); padding:12px; }
@@ -354,36 +379,80 @@ body.materialResizing .materialChat, body.materialResizing .materialDrawer { tra
 .surfaceControls { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; margin-top:16px; }
 .surfaceField { display:flex; flex-direction:column; gap:6px; min-width:180px; flex:1; }
 .surfaceField label { font-size:8px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); }
-.surfaceFnRow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-.surfaceFnExpr { flex:1; min-width:0; }
+/* The only way to set f(x, y) now that the lasso reader is gone, so it gets
+   the full row plus a noticeably larger, easier-to-read type size instead of
+   sharing space with a button. */
+.surfaceFieldWide { flex-basis:100%; }
+.surfaceFnExpr { min-width:0; margin-top:8px; padding:13px 15px; font-size:15px; letter-spacing:.01em; }
+/* Live mirror of what the parser actually built from the typed text, not the
+   text itself - typing "sinx" renders visibly as s\cdot i\cdot n\cdot x, which
+   shows the misread at a glance instead of making the student guess why the
+   plot didn't change. Keeps the last good render (dimmed) through a mid-typo
+   parse failure instead of blanking out on every keystroke. */
+.surfaceFnPreview { min-height:44px; padding:10px 14px; border:1px solid var(--line);
+  background:rgba(6,15,23,.55); display:flex; align-items:center; justify-content:center;
+  overflow-x:auto; }
+.surfaceFnPreview:empty { display:none; }
+.surfaceFnPreview.stale { opacity:.4; }
+.surfaceFnPreview .katex { font-size:1.15em; }
 .surfaceErr { font-size:10px; color:var(--red); min-height:1.2em; }
 .surfaceReadout { display:flex; gap:8px; }
-.surfaceExplain { display:flex; gap:10px; margin-top:14px; padding:11px 13px; border:1px solid rgba(245,158,11,.28); background:rgba(79,48,4,.18); }
-.surfaceExplain svg { flex:none; width:15px; height:15px; margin-top:1px; color:var(--amber); }
-.surfaceExplainText { font-size:11px; line-height:1.6; color:var(--ink); }
-.surfaceExplainText strong { color:#ffe3b0; }
-/* Auto verdict comparing every restriction path against every other, not
-   just the one currently selected - amber while still computing/empty,
-   red once two paths disagree (limit provably doesn't exist), green when
-   every tested path agrees (consistent with existing, never proof of it). */
-.surfaceVerdict { margin-top:10px; padding:11px 13px; border:1px solid var(--line); font-size:11px; line-height:1.6; }
-.surfaceVerdict strong { color:inherit; }
-.surfaceVerdict.no-limit { border-color:rgba(255,91,118,.4); background:rgba(40,6,10,.32); color:#ffb9c4; }
-.surfaceVerdict.no-limit strong { color:#fff; }
-.surfaceVerdict.consistent { border-color:rgba(74,222,128,.35); background:rgba(6,30,16,.4); color:#bdf5cf; }
-.surfaceVerdict.consistent strong { color:#fff; }
-.surfaceVerdict.pending { border-color:var(--line); color:var(--muted); }
-.surfacePathTable { display:flex; flex-direction:column; gap:1px; margin-top:8px; border:1px solid var(--line); background:var(--line); }
-.surfacePathRow { display:flex; justify-content:space-between; gap:10px; padding:6px 10px; background:rgba(6,15,23,.7); font-size:10px; }
-.surfacePathRow.active { background:rgba(18,48,68,.6); }
-.surfacePathLabel { color:var(--muted); }
-.surfacePathRow.active .surfacePathLabel { color:var(--cyan); }
-.surfacePathValue { font-variant-numeric:tabular-nums; color:var(--ink); }
-.surfacePathRow.outlier .surfacePathValue { color:#ff5b76; font-weight:600; }
-.surfaceSlopeRow { display:flex; align-items:center; gap:8px; }
-.surfaceSlopeRow[hidden] { display:none; }
-.surfaceSlopeRow input[type=range] { width:110px; }
-.surfaceSlopeRow span { font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums; min-width:5.5em; }
+.surfaceCoordInput {
+  width:56px; padding:0; margin-top:1px; background:transparent;
+  border:none; border-bottom:1px solid transparent; color:var(--ink);
+  font:13px/1.2 var(--mono); text-align:center; border-radius:0;
+}
+.surfaceCoordInput:hover { border-bottom-color:var(--line); }
+.surfaceCoordInput:focus { outline:none; box-shadow:none; border-bottom-color:var(--cyan); }
+.surfaceCoordInput::-webkit-inner-spin-button, .surfaceCoordInput::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+.surfaceCoordInput[type=number] { -moz-appearance:textfield; }
+.surfacePathAddRow { display:flex; gap:8px; align-items:center; }
+.surfacePathVarSelect { flex:none; padding:9px 8px; font-size:12px; }
+.surfacePathAddRow input[type=text] { flex:1; }
+.surfacePathAddRow button { flex:none; }
+.surfacePathList { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.surfacePathList:empty { margin-top:0; }
+.surfacePathChip {
+  display:inline-flex; align-items:center; gap:7px; padding:5px 5px 5px 10px;
+  border:1px solid var(--line); font:11px var(--mono); color:var(--ink);
+}
+.surfacePathSwatch { flex:none; width:8px; height:8px; border-radius:50%; }
+.surfacePathChipRemove { padding:2px 6px; border-color:transparent; color:var(--muted); background:transparent; }
+.surfacePathChipRemove:hover { color:var(--red); border-color:rgba(255,122,112,.35); box-shadow:none; }
+/* ── Probability (MH-course binomial PMF + calculator) ─────────────────── */
+/* Also holds the Joint distributions tool (below) - container-type is here,
+   not scoped to just that half, so the .surfaceDash two-column rows it
+   reuses from the Telemetry tab collapse to one column at the same drawer
+   width, without a second breakpoint rule to keep in sync. */
+#probPane { padding:16px clamp(16px,3vw,32px); gap:14px; overflow-y:auto; container-type:inline-size; }
+.probCol { display:flex; flex-direction:column; min-width:0; border:1px solid var(--line); background:rgba(6,15,23,.55); padding:12px; }
+.probColHead { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+.probCanvas { width:100%; height:auto; aspect-ratio:2/1; background:#040b12; border:1px solid var(--line); }
+.probResultsRow { flex-wrap:wrap; }
+/* ── Joint distributions (Ch6) ─────────────────────────────────────────── */
+.jointModeToggle { flex:none; display:flex; align-items:stretch; border:1px solid var(--line); background:rgba(4,12,19,.96); align-self:flex-start; }
+.jointModeToggle button { min-width:0; padding:8px 14px; border:0; border-left:1px solid var(--line); background:transparent; font-size:9px; }
+.jointModeToggle button:first-of-type { border-left:0; }
+.jointModeToggle button[aria-pressed="true"] { color:#eaf9ff; border-color:var(--cyan); background:rgba(56,211,255,.16); }
+.jointModeLabel { display:flex; align-items:center; padding:0 10px; font-size:8px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); }
+.jointSection { display:flex; flex-direction:column; gap:14px; }
+.jointSection[hidden] { display:none; }
+.jointTableWrap { overflow-x:auto; }
+.jointTable { border-collapse:collapse; font:12px var(--mono); }
+.jointTable th, .jointTable td { border:1px solid var(--line); padding:0; text-align:center; }
+.jointTable thead th, .jointTable td:first-child { padding:6px 8px; }
+/* Header cells double as the "condition on this value" control - focusing
+   one (click or tab) sets it, so the edit target and the selection target
+   are the same element rather than a separate button next to each. */
+.jointHeaderInput { width:56px; padding:6px 4px; background:transparent; border:0; color:var(--ink); font:12px var(--mono); text-align:center; cursor:pointer; }
+.jointHeaderInput:hover { background:rgba(56,211,255,.1); }
+.jointHeaderInput.selected { color:#eaf9ff; background:rgba(56,211,255,.22); }
+.jointCell input { width:64px; padding:6px 4px; background:transparent; border:0; color:var(--ink); font:12px var(--mono); text-align:center; }
+.jointCell input:focus { outline:none; box-shadow:none; background:rgba(56,211,255,.08); }
+.jointMargin { background:rgba(56,211,255,.07); font-weight:600; }
+.jointCorner { background:rgba(6,15,23,.9); }
+.jointTotalOk { color:var(--green); }
+.jointTotalBad { color:var(--red); }
 #compendiumPane { padding:18px clamp(18px,4vw,48px); gap:11px; overflow-y:auto; }
 .compendiumIntro { color:var(--muted); font-size:11px; line-height:1.6; max-width:640px; }
 .compendiumTools { display:flex; gap:8px; }
@@ -578,6 +647,82 @@ body.labOpen > header, body.labOpen > main, body.labOpen > #announcementPanel, b
   .labExplorer { flex:none; max-height:160px; border-right:0; border-bottom:1px solid var(--line); }
   .labRight { flex:none; border-left:0; border-top:1px solid var(--line); min-height:260px; }
 }
+
+/* ── Research (URECA proposal drafting) ─────────────────────────────────
+   Same full-viewport overlay pattern as Lab - a proposal has too many
+   fields (title, supervisor, background, objectives, methodology,
+   outcomes, budget, timeline, deliverables) to fit the small dashboard
+   tile, so the tile is a launcher and this is the actual workspace. */
+.researchShade { position:fixed; inset:0; z-index:70; background:rgba(0,5,9,.72); opacity:0; pointer-events:none; transition:opacity .18s; }
+.researchOverlay { position:fixed; z-index:71; inset:0; display:flex; flex-direction:column;
+  visibility:hidden; opacity:0; pointer-events:none; background:#040a11; transition:opacity .18s ease; }
+body.researchOpen .researchShade { opacity:1; pointer-events:auto; }
+body.researchOpen .researchOverlay { visibility:visible; opacity:1; pointer-events:auto; }
+body.researchOpen > header, body.researchOpen > main, body.researchOpen > #announcementPanel, body.researchOpen > footer {
+  visibility:hidden; pointer-events:none;
+}
+.researchHead { flex:none; display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;
+  padding:11px 16px; border-bottom:1px solid var(--line); background:#050d15; }
+.researchKicker { color:var(--cyan); font-size:10px; letter-spacing:.18em; text-transform:uppercase; margin-right:10px; }
+.researchHeadActions { display:flex; align-items:center; gap:8px; }
+#researchClose { color:var(--muted); border-color:transparent; background:transparent; padding:6px 9px; font-size:14px; }
+#researchClose:hover { color:var(--red); }
+.researchBody { flex:1 1 auto; min-height:0; display:flex; }
+.researchList { flex:0 0 260px; min-width:0; display:flex; flex-direction:column; border-right:1px solid var(--line); background:rgba(4,10,16,.5); }
+.researchListHead { flex:none; display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding:10px 12px; font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--line); }
+.researchRows { flex:1; min-height:0; overflow-y:auto; }
+.researchRow { padding:10px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
+.researchRow:hover { background:rgba(38,92,124,.35); }
+.researchRow.active { background:rgba(56,211,255,.15); box-shadow:inset 2px 0 0 var(--cyan); }
+.researchRowTitle { color:var(--ink); font-size:12px; overflow-wrap:anywhere; }
+.researchRowMeta { color:var(--muted); font-size:9px; text-transform:uppercase; letter-spacing:.08em; margin-top:5px; }
+.researchEmpty { padding:16px 12px; color:var(--muted); font-size:11px; line-height:1.6; }
+.researchFormArea { flex:1 1 auto; min-width:0; overflow-y:auto; padding:18px clamp(18px,3vw,32px) 40px; }
+.researchTopRow { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
+.researchTopRow input[type=text] { flex:1 1 260px; min-width:0; }
+.researchTopRow select { flex:none; }
+.researchGrid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:16px; }
+.researchField { display:flex; flex-direction:column; gap:6px; }
+.researchField.full { grid-column:1 / -1; }
+.researchField label { font-size:8px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); }
+.researchField textarea { min-height:88px; resize:vertical; width:100%; padding:9px 11px; background:rgba(4,10,16,.8);
+  border:1px solid var(--line); color:var(--ink); font:12px/1.5 var(--mono); box-sizing:border-box; }
+.researchField textarea:focus { outline:none; border-color:var(--cyan); box-shadow:var(--glow); }
+.researchDraftBar { display:flex; align-items:center; gap:10px; margin:2px 0 20px; flex-wrap:wrap; }
+.researchDraftBar input[type=text] { flex:1 1 260px; min-width:0; }
+.researchSectionHead { font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--cyan); margin:22px 0 10px; }
+.researchDeliverables { display:flex; flex-wrap:wrap; gap:10px; }
+.researchDeliverable { display:flex; align-items:center; gap:8px; padding:8px 11px; border:1px solid var(--line); font-size:11px; cursor:pointer; }
+.researchDeliverable:hover { border-color:var(--line-hot); }
+.researchFoot { flex:none; display:flex; align-items:center; gap:16px; padding:6px 16px; border-top:1px solid var(--line);
+  background:#050d15; font-size:9px; letter-spacing:.06em; color:var(--muted); }
+.researchProfileBar { flex:none; display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+  padding:8px 16px; border-bottom:1px solid var(--line); background:rgba(4,10,16,.6); }
+.researchProfileLabel { font-size:8px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); }
+.researchProfileBar input[type=text] { flex:1 1 160px; min-width:0; padding:6px 9px; font-size:11px; }
+.researchSuggestIntro { color:var(--muted); font-size:11px; line-height:1.6; margin-bottom:14px; }
+.researchSuggestList { display:flex; flex-direction:column; gap:10px; }
+.researchSuggestCard { border:1px solid var(--line); padding:12px 14px; display:flex; flex-direction:column; gap:8px; }
+.researchSuggestCard:hover { border-color:var(--line-hot); }
+.researchSuggestTitle { color:var(--ink); font-size:13px; }
+.researchSuggestTopic { color:var(--muted); font-size:11px; line-height:1.55; }
+.researchSuggestActions { display:flex; align-items:center; gap:8px; }
+.researchStar { color:var(--muted); }
+.researchStar.starred { color:var(--cyan); border-color:var(--cyan); }
+.researchSavedRows { flex:0 1 auto; max-height:180px; overflow-y:auto; border-bottom:1px solid var(--line); }
+.researchSavedRow { padding:9px 12px; border-bottom:1px solid var(--line); display:flex; flex-direction:column; gap:6px; }
+.researchSavedTitle { color:var(--ink); font-size:11px; overflow-wrap:anywhere; }
+.researchSavedTopic { color:var(--muted); font-size:9px; line-height:1.5; overflow-wrap:anywhere; }
+.researchSavedActions { display:flex; align-items:center; gap:6px; }
+.researchSavedActions button { font-size:9px; padding:4px 7px; }
+.researchSavedEmpty { padding:10px 12px; color:var(--muted); font-size:9px; line-height:1.6; }
+@media (max-width:900px) {
+  .researchBody { flex-direction:column; overflow-y:auto; }
+  .researchList { flex:none; max-height:200px; border-right:0; border-bottom:1px solid var(--line); }
+  .researchGrid { grid-template-columns:1fr; }
+}
+
 .materialHead { flex:none; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px;
   padding:17px 18px 13px; border-bottom:1px solid var(--line); }
 .materialTitle { color:#eaf9ff; font-size:13px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
@@ -590,7 +735,9 @@ body.labOpen > header, body.labOpen > main, body.labOpen > #announcementPanel, b
 .materialFallback { max-width:480px; color:var(--muted); line-height:1.7; text-align:center; }
 @media (max-width:900px) {
   :root { --material-drawer-width:min(720px,94vw); }
-  body.materialOpen { padding-left:0; }
+  /* .materialChat is display:none below, so the page itself is what scrolls here -
+     undo the desktop rule's overflow:hidden along with its padding-left. */
+  body.materialOpen { padding-left:0; overflow:visible; }
   body.materialOpen > header, body.materialOpen > main, body.materialOpen > #announcementPanel, body.materialOpen > footer { visibility:visible; }
   .materialChat { display:none; }
   .materialResizer { display:none; }
@@ -710,9 +857,24 @@ label.course:hover { background: var(--panel-lit); border-color: var(--line-hot)
                flex-wrap: wrap; }
 .tpDay .pips i { width: 4px; height: 4px; border-radius: 50%; background: var(--cyan-dim);
                  display: block; }
+.tpDay .pips i.important { background: var(--amber); box-shadow: 0 0 4px var(--amber); }
 .tpDay[aria-pressed="true"] .pips i { background: var(--cyan); box-shadow: 0 0 5px var(--cyan); }
 .tpItem.dynamic { border-left-color:var(--amber); background:rgba(255,190,82,.07); }
 .tpChange { color:var(--amber); font-size:9px; display:block; margin-top:4px; }
+.tpAgenda { margin:10px 0 12px; border:1px solid var(--line); background:rgba(8,20,30,.38); }
+.tpAgenda summary { cursor:pointer; padding:8px 10px; color:var(--amber);
+  font-size:10px; letter-spacing:.13em; text-transform:uppercase; }
+.tpAgendaRows { max-height:240px; overflow:auto; border-top:1px solid var(--line); }
+.tpAgendaRow { display:grid; grid-template-columns:58px 92px 70px 1fr; gap:8px;
+  align-items:center; padding:6px 9px; border-bottom:1px solid rgba(95,216,255,.08);
+  font-size:10px; }
+.tpAgendaRow:last-child { border-bottom:0; }
+.tpAgendaWeek { color:var(--amber); font-weight:700; }
+.tpAgendaWhen { color:var(--cyan-soft); }
+.tpAgendaCourse { color:var(--ink); font-weight:700; }
+.tpAgendaMeta { min-width:0; overflow-wrap:anywhere; }
+.tpAmended { color:var(--amber); font-size:8px; text-transform:uppercase;
+  letter-spacing:.1em; margin-left:5px; }
 /* Keep every class visible; the temporal panel and its grid row grow with the day. */
 #tpDaySchedule { max-height: none; overflow: visible; }
 .tpPhase {
@@ -1140,6 +1302,10 @@ code { color: var(--cyan); }
   <div class="tpPhase"><span id="tpPhase">—</span>
     <select id="tpTeachingWeek" aria-label="Teaching week"></select></div>
   <div id="tpWeek" role="group" aria-label="Selected teaching week weekdays"></div>
+  <details class="tpAgenda" open>
+    <summary id="tpAgendaSummary">Assessment radar</summary>
+    <div class="tpAgendaRows" id="tpAssessments"></div>
+  </details>
   <div class="tpSubhead" id="tpSubhead">Schedule</div>
   <div id="tpDaySchedule" aria-live="polite"></div>
   <div class="tpUpload">
@@ -1180,6 +1346,16 @@ code { color: var(--cyan); }
     <button class="primary" id="techieOpen">Open Techie Delight</button>
     <span class="muted">DSA problem practice - opens in a new tab (the site blocks embedding)</span>
   </div>
+</section>
+
+<section class="panel" id="researchPanel">
+  <h2>Research</h2>
+  <p class="muted" style="margin-bottom:12px">Draft and track a URECA project proposal - get AI-proposed topics for your profile, pick one, and it researches and fills the proposal in depth on its own.</p>
+  <div class="chips" style="margin-bottom:12px">
+    <div class="chip"><span class="k">Proposals</span><span class="v" id="researchCount">0</span></div>
+    <div class="chip"><span class="k">Registers by</span><span class="v" id="researchDeadline">—</span></div>
+  </div>
+  <button type="button" id="researchOpen" class="primary">Open Research</button>
 </section>
 
 <section class="panel" id="inboundPanel">
@@ -1260,7 +1436,7 @@ code { color: var(--cyan); }
   <header class="materialChatHead">
     <div class="materialChatKicker">Thank·God·It's·Friday (TGIF)</div>
     <div class="materialChatContext" id="materialChatContext"></div>
-    <div class="studyTabs" role="tablist"><button type="button" class="studyTab" id="notesTab" role="tab" aria-selected="true">Notes</button><button type="button" class="studyTab" id="fridayTab" role="tab" aria-selected="false">Ask FRIDAY</button><button type="button" class="studyTab" id="graphTab" role="tab" aria-selected="false" hidden>Graph</button><button type="button" class="studyTab" id="compendiumTab" role="tab" aria-selected="false">Compendium</button></div>
+    <div class="studyTabs" role="tablist"><button type="button" class="studyTab" id="notesTab" role="tab" aria-selected="true">Notes</button><button type="button" class="studyTab" id="fridayTab" role="tab" aria-selected="false">Ask FRIDAY</button><button type="button" class="studyTab" id="graphTab" role="tab" aria-selected="false" hidden>Telemetry</button><button type="button" class="studyTab" id="probTab" role="tab" aria-selected="false" hidden>Stochastic</button><button type="button" class="studyTab" id="compendiumTab" role="tab" aria-selected="false">Compendium</button></div>
   </header>
   <section class="studyPane active" id="notesPane" role="tabpanel">
     <div class="notesTools" style="position:relative"><input type="search" id="notesSearch" placeholder="Search all notes…"><div class="notesSearchResults" id="notesSearchResults"></div></div>
@@ -1286,30 +1462,21 @@ code { color: var(--cyan); }
     </form>
   </section>
   <section class="studyPane" id="graphPane" role="tabpanel">
+    <div class="surfaceStatusRow">
+      <div class="surfaceReadout">
+        <div class="chip"><span class="k">Current X</span>
+          <input type="number" class="v surfaceCoordInput" id="surfaceX" step="0.01" inputmode="decimal"
+            title="Type an x-coordinate to move the point there - even where the limit doesn't exist"></div>
+        <div class="chip"><span class="k">Current Y</span>
+          <input type="number" class="v surfaceCoordInput" id="surfaceY" step="0.01" inputmode="decimal"
+            title="Type a y-coordinate to move the point there - even where the limit doesn't exist"></div>
+        <div class="chip"><span class="k">f(x, y)</span><span class="v" id="surfaceZ">0.00</span></div>
+      </div>
+    </div>
     <div class="surfaceDash" id="surfaceDash">
       <div class="surfaceCol">
         <div class="surfaceColHead">
           <span class="surfaceColTitle">2D Contour Map</span>
-          <select id="surfacePath" title="Overlay a path toward the origin">
-            <option value="none">No path</option>
-            <option value="y=x">Line y = x</option>
-            <option value="y=-x">Line y = -x</option>
-            <option value="y=0">Line y = 0 (X-axis)</option>
-            <option value="x=0">Line x = 0 (Y-axis)</option>
-            <option value="y=x2">Parabola y = x^2</option>
-            <option value="y=mx">Family y = m·x (slider)</option>
-          </select>
-          <div class="surfaceSlopeRow" id="surfaceSlopeRow" hidden>
-            <input type="range" id="surfaceSlopeSlider" min="-5" max="5" step="0.1" value="1"
-              title="Slide m to sweep the whole line family through the origin">
-            <span id="surfaceSlopeValue">m = 1.0</span>
-          </div>
-          <button type="button" id="surfaceAnimate" class="surfaceIconBtn" disabled
-            title="Animate the point toward the origin along the selected path">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-              stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
-            Animate to origin
-          </button>
         </div>
         <canvas class="surfaceCanvas" id="surfaceContour" width="560" height="560"></canvas>
         <div class="surfaceHint">Drag inside the plot to move the point (x, y).</div>
@@ -1325,35 +1492,152 @@ code { color: var(--cyan); }
       </div>
     </div>
     <div class="surfaceControls">
-      <div class="surfaceField">
+      <div class="surfaceField surfaceFieldWide">
         <label for="surfaceFnExpr">Function f(x, y)</label>
-        <div class="surfaceFnRow">
-          <input type="text" class="surfaceFnExpr" id="surfaceFnExpr" value="2*x*y / (x^2 + y^2)"
-            title="Edit the function directly, or lasso one off the material">
-          <button type="button" id="surfaceLassoFn" class="surfaceIconBtn"
-            title="Lasso a segment of the displayed material and FRIDAY will read the function off it">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-              stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14"/>
-              <path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>
-            <span id="surfaceLassoLabel">Lasso function</span>
-          </button>
+        <div class="surfaceFnPreview" id="surfaceFnPreview" aria-live="polite"></div>
+        <input type="text" class="surfaceFnExpr" id="surfaceFnExpr" value="2*x*y / (x^2 + y^2)"
+          title="Type a function of x and y, e.g. 2*x*y / (x^2 + y^2)"
+          placeholder="Type a function of x and y, e.g. 2*x*y / (x^2 + y^2)">
+        <div class="surfaceErr" id="surfaceFnStatus"></div>
+      </div>
+      <div class="surfaceField surfaceFieldWide">
+        <label for="surfacePathExpr">Restricted paths (y = g(x) or x = g(y), through the origin)</label>
+        <div class="surfacePathAddRow">
+          <select id="surfacePathVar" class="surfacePathVarSelect" title="Choose which variable this path defines">
+            <option value="y">y =</option>
+            <option value="x">x =</option>
+          </select>
+          <input type="text" id="surfacePathExpr" maxlength="200"
+            title="Add a path to overlay, e.g. x, -x, x^2, 2x, sin(x), or a constant like 0"
+            placeholder="e.g. x, -x, x^2, 2x, sin(x), or 0">
+          <button type="button" class="primary" id="surfacePathAdd">Add path</button>
         </div>
-        <div class="surfaceErr" id="surfaceLassoStatus"></div>
-      </div>
-      <div class="surfaceReadout">
-        <div class="chip"><span class="k">Current X</span><span class="v" id="surfaceX">0.00</span></div>
-        <div class="chip"><span class="k">Current Y</span><span class="v" id="surfaceY">0.00</span></div>
-        <div class="chip"><span class="k">f(x, y)</span><span class="v" id="surfaceZ">0.00</span></div>
+        <div class="surfaceErr" id="surfacePathStatus"></div>
+        <div class="surfacePathList" id="surfacePathList"></div>
       </div>
     </div>
-    <div class="surfaceExplain">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-        stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/>
-        <line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-      <div class="surfaceExplainText" id="surfaceExplainText"></div>
+  </section>
+  <section class="studyPane" id="probPane" role="tabpanel">
+    <div class="jointModeToggle" role="group" aria-label="Stochastic tool">
+      <span class="jointModeLabel">Tool</span>
+      <button type="button" data-stoch-mode="single" aria-pressed="true">Single distribution</button>
+      <button type="button" data-stoch-mode="joint" aria-pressed="false">Joint distributions</button>
     </div>
-    <div class="surfaceVerdict pending" id="surfaceVerdict">Computing every restriction path…</div>
-    <div class="surfacePathTable" id="surfacePathTable"></div>
+
+    <div class="jointSection" id="probSingleSection">
+      <div class="probCol">
+        <div class="probColHead">
+          <span class="surfaceColTitle" id="probColTitle">Binomial Distribution: PMF</span>
+          <select id="probDist" title="Choose which MH2500 distribution to explore">
+            <option value="binomial">Binomial</option>
+            <option value="poisson">Poisson</option>
+            <option value="geometric">Geometric</option>
+            <option value="hypergeometric">Hypergeometric</option>
+            <option value="uniform">Uniform</option>
+            <option value="normal">Normal</option>
+            <option value="exponential">Exponential</option>
+            <option value="gamma">Gamma</option>
+          </select>
+        </div>
+        <canvas class="probCanvas" id="probPmfCanvas" width="640" height="320"></canvas>
+        <div class="surfaceHint" id="probHint">Bars show P(X = k) for a Binomial(n, p) variable; the selected k is highlighted.</div>
+      </div>
+      <div class="surfaceControls" id="probParams"></div>
+      <div class="surfaceControls">
+        <div class="surfaceField">
+          <label for="probK" id="probKLabel">k</label>
+          <input type="number" id="probK" step="1" value="5">
+        </div>
+      </div>
+      <div class="surfaceErr" id="probStatus"></div>
+      <div class="surfaceReadout probResultsRow">
+        <div class="chip"><span class="k" id="probPmfLabel">P(X = k)</span><span class="v" id="probPmfVal">0.0000</span></div>
+        <div class="chip"><span class="k" id="probCdfLeLabel">P(X ≤ k)</span><span class="v" id="probCdfLe">0.0000</span></div>
+        <div class="chip"><span class="k" id="probCdfGeLabel">P(X ≥ k)</span><span class="v" id="probCdfGe">0.0000</span></div>
+        <div class="chip"><span class="k">Mean</span><span class="v" id="probMean">0.00</span></div>
+        <div class="chip"><span class="k">Variance</span><span class="v" id="probVar">0.00</span></div>
+        <div class="chip"><span class="k">Std dev</span><span class="v" id="probStd">0.00</span></div>
+      </div>
+    </div>
+
+    <div class="jointSection" id="probJointSection" hidden>
+      <div class="jointModeToggle" role="group" aria-label="Joint distribution input mode">
+        <span class="jointModeLabel">Mode</span>
+        <button type="button" data-joint-mode="discrete" aria-pressed="true">Discrete table</button>
+        <button type="button" data-joint-mode="continuous" aria-pressed="false">Continuous f(x, y)</button>
+      </div>
+
+      <div class="jointSection" id="jointDiscreteSection">
+        <div class="probCol">
+          <div class="probColHead">
+            <span class="surfaceColTitle">Joint PMF p(x, y)</span>
+            <button type="button" class="surfaceIconBtn" id="jointAddCol" title="Add another x value">+ x</button>
+            <button type="button" class="surfaceIconBtn" id="jointRemoveCol" title="Remove the last x value">− x</button>
+            <button type="button" class="surfaceIconBtn" id="jointAddRow" title="Add another y value">+ y</button>
+            <button type="button" class="surfaceIconBtn" id="jointRemoveRow" title="Remove the last y value">− y</button>
+            <button type="button" class="surfaceIconBtn" id="jointNormalize" title="Rescale every cell so the table sums to 1">Normalize</button>
+            <button type="button" class="surfaceIconBtn" id="jointResetExample" title="Restore the starting example">Reset example</button>
+          </div>
+          <div class="jointTableWrap"><table class="jointTable" id="jointTable"></table></div>
+          <div class="surfaceHint">Edit any cell, or the x/y labels in the headers - row and column sums (the shaded margin) are exactly the marginal distributions, which is where the name comes from. Click a header to condition on that value below.</div>
+          <div class="surfaceErr" id="jointDiscreteStatus"></div>
+        </div>
+        <div class="surfaceDash">
+          <div class="probCol">
+            <div class="probColHead"><span class="surfaceColTitle">P(X = x)</span></div>
+            <canvas class="probCanvas" id="jointBarX" width="480" height="240"></canvas>
+            <div class="surfaceHint" id="jointBarXHint">Blue = marginal. Orange = conditional on the y you clicked.</div>
+          </div>
+          <div class="probCol">
+            <div class="probColHead"><span class="surfaceColTitle">P(Y = y)</span></div>
+            <canvas class="probCanvas" id="jointBarY" width="480" height="240"></canvas>
+            <div class="surfaceHint" id="jointBarYHint">Blue = marginal. Orange = conditional on the x you clicked.</div>
+          </div>
+        </div>
+        <div class="surfaceReadout probResultsRow" id="jointDiscreteStats"></div>
+        <div class="surfaceErr" id="jointDiscreteIndependence"></div>
+      </div>
+
+      <div class="jointSection" id="jointContinuousSection" hidden>
+        <div class="surfaceField surfaceFieldWide">
+          <label for="jointFnExpr">Joint density f(x, y)</label>
+          <div class="surfaceFnPreview" id="jointFnPreview" aria-live="polite"></div>
+          <input type="text" class="surfaceFnExpr" id="jointFnExpr" value="(x<y)*2"
+            title="Type a joint density of x and y. Comparisons like (x<y) act as an indicator (1 or 0), which is how to build a triangular or other irregular support - e.g. (x<y)*2 for the classic 0<x<y<1 example"
+            placeholder="e.g. (x<y)*2, or 6*x*y^2, or exp(-x-y)">
+          <div class="surfaceErr" id="jointFnStatus"></div>
+        </div>
+        <div class="surfaceControls">
+          <div class="surfaceField"><label for="jointAx">x from</label><input type="number" id="jointAx" step="0.1" value="0"></div>
+          <div class="surfaceField"><label for="jointBx">x to</label><input type="number" id="jointBx" step="0.1" value="1"></div>
+          <div class="surfaceField"><label for="jointAy">y from</label><input type="number" id="jointAy" step="0.1" value="0"></div>
+          <div class="surfaceField"><label for="jointBy">y to</label><input type="number" id="jointBy" step="0.1" value="1"></div>
+          <label class="researchDeliverable"><input type="checkbox" id="jointAutoNormalize" checked> Auto-normalize (divide by ∫∫f over this rectangle)</label>
+        </div>
+        <div class="surfaceDash">
+          <div class="probCol">
+            <div class="probColHead">
+              <span class="surfaceColTitle">Joint density</span>
+              <span class="surfaceReadout">
+                <span class="chip"><span class="k">x0</span><input type="number" class="v surfaceCoordInput" id="jointX0" step="0.01"></span>
+                <span class="chip"><span class="k">y0</span><input type="number" class="v surfaceCoordInput" id="jointY0" step="0.01"></span>
+              </span>
+            </div>
+            <canvas class="surfaceCanvas" id="jointHeatmap" width="420" height="420"></canvas>
+            <div class="surfaceHint">Click or drag to move (x0, y0) - it drives the conditional curves.</div>
+          </div>
+          <div class="probCol">
+            <div class="probColHead"><span class="surfaceColTitle">f<sub>X</sub>(x) vs f(x | Y = y0)</span></div>
+            <canvas class="probCanvas" id="jointCurveX" width="480" height="240"></canvas>
+            <div class="probColHead" style="margin-top:12px"><span class="surfaceColTitle">f<sub>Y</sub>(y) vs f(y | X = x0)</span></div>
+            <canvas class="probCanvas" id="jointCurveY" width="480" height="240"></canvas>
+            <div class="surfaceHint">Blue fill = marginal. Orange line = conditional at the current point. The closer they track, the closer X and Y are to independent.</div>
+          </div>
+        </div>
+        <div class="surfaceReadout probResultsRow" id="jointContinuousStats"></div>
+        <div class="surfaceErr" id="jointContinuousIndependence"></div>
+      </div>
+    </div>
   </section>
   <section class="studyPane" id="compendiumPane" role="tabpanel">
     <div class="compendiumIntro">Compile an AI-composed, page-cited LaTeX study
@@ -1480,6 +1764,45 @@ code { color: var(--cyan); }
   </footer>
 </section>
 
+<div class="researchShade" id="researchShade"></div>
+<section class="researchOverlay" id="researchOverlay" aria-hidden="true" aria-label="Research (URECA proposal)">
+  <header class="researchHead">
+    <div><span class="researchKicker">Research</span><span class="muted" id="researchDeadlineFoot"></span></div>
+    <div class="researchHeadActions">
+      <button type="button" id="researchSuggest" class="primary"
+        title="Propose 3-5 candidate topics for your profile - pick one to research it in depth automatically">
+        Suggest topics</button>
+      <button type="button" id="researchNew">New proposal</button>
+      <button type="button" id="researchDelete">Delete</button>
+      <button type="button" id="researchClose" title="Close Research" aria-label="Close Research">×</button>
+    </div>
+  </header>
+  <div class="researchProfileBar" id="researchProfileBar">
+    <span class="researchProfileLabel">Research profile</span>
+    <input type="text" id="rpProgramme" placeholder="Programme, e.g. NTU MACS">
+    <input type="text" id="rpYear" placeholder="Year, e.g. Y2">
+    <input type="text" id="rpField" placeholder="Field, e.g. Mathematical and Computer Sciences">
+    <input type="text" id="rpKeywords"
+      placeholder="Keywords/interests to anchor suggestions, e.g. graph algorithms, low-resource NLP"
+      title="Anchors 'Suggest topics' so ideas grow out of what you name here, instead of your field in general">
+    <span class="muted" id="researchProfileStatus"></span>
+  </div>
+  <div class="researchBody">
+    <aside class="researchList">
+      <div class="researchListHead"><span>Proposals</span></div>
+      <div class="researchRows" id="researchRows"></div>
+      <div class="researchListHead"><span>Saved topics</span><span class="muted" id="researchSavedCount"></span></div>
+      <div class="researchSavedRows" id="researchSavedRows"></div>
+    </aside>
+    <div class="researchFormArea" id="researchFormArea">
+      <div class="researchEmpty">No proposals yet - use "Suggest topics" for AI-proposed ideas, or "New proposal" to start your own.</div>
+    </div>
+  </div>
+  <footer class="researchFoot">
+    <span id="researchStatus">Idle</span>
+  </footer>
+</section>
+
 <footer>
   <span>Staging <b id="rootLabel">—</b></span>
   <span>Drive <b id="footDrive">—</b></span>
@@ -1497,7 +1820,7 @@ const $ = (id) => document.getElementById(id);
 const WORKFLOW_ORDER = [
   'authSection', 'priorityPanel', 'temporalPanel', 'todoPanel',
   'inboundPanel', 'labPanel', 'coursePanel', 'manifestPanel',
-  'transcribePanel', 'drivePanel', 'techiePanel', 'systemPanel', 'consolePanel'
+  'transcribePanel', 'drivePanel', 'techiePanel', 'researchPanel', 'systemPanel', 'consolePanel'
 ];
 const dashboardMain = document.querySelector('main');
 WORKFLOW_ORDER.forEach(id => dashboardMain.appendChild($(id)));
@@ -2295,7 +2618,7 @@ document.addEventListener('click', async (ev) => {
   } catch (e) { alert(e.message); }
 });
 
-// The Graph tab's course gate reads a course code back out of a material's path, and
+// The Telemetry tab's course gate reads a course code back out of a material's path, and
 // needs the same "strip the academic-year prefix" rule as course-name matching:
 // "AY2026-2027, Semester 1, MH2100 (Calculus III)" - the academic year has the exact
 // shape of a course code and comes first, so a naive match returns AY2026. It is
@@ -2522,16 +2845,20 @@ function renderTemporal(s) {
 
   // Selection is part of the signature, otherwise clicking a tab would be undone by
   // the next poll.
-  const sig = JSON.stringify([week, today, selected.key, selectedWeek.week, todayKey]);
+  const importantDates = sc.important_dates || [];
+  const sig = JSON.stringify([week, importantDates, today, selected.key, selectedWeek.week, todayKey]);
   if (sig === sigTemporal) return;
   sigTemporal = sig;
+  renderAssessmentAgenda(importantDates, weeks);
 
   $('tpWeek').className = 'tpWeek';
   $('tpWeek').innerHTML = TP_WEEKDAYS.map(d => `<span class="tpWeekHead" role="presentation">${d.slice(0, 2)}</span>`).join('')
     + TP_DATES.map(item => {
     const rows = week[item.day] || [];
+    const events = importantDates.filter(event => event.date === item.key);
     // One pip per class, capped so a heavy day does not blow the cell open.
-    const pips = rows.slice(0, 5).map(() => '<i></i>').join('');
+    const pips = rows.slice(0, 5).map(() => '<i></i>').join('')
+      + events.slice(0, 3).map(() => '<i class="important"></i>').join('');
     return `<button type="button" class="tpDay${item.key === todayKey ? ' today' : ''}"
       aria-pressed="${item.key === selected.key}" data-day="${item.day}" data-date="${item.key}"
       title="${TP_FULL[item.day]}, ${item.date.toLocaleDateString()} — ${rows.length} class(es)">
@@ -2542,6 +2869,39 @@ function renderTemporal(s) {
 
   renderTemporalDay(s, active, selected.date, selected.key === todayKey ? today : null, week);
   renderScheduleSource(sc);
+}
+
+function renderAssessmentAgenda(events, weeks) {
+  const weekFor = (key) => {
+    const when = new Date(`${key}T00:00:00`);
+    const found = weeks.find(item => {
+      const monday = new Date(`${item.monday}T00:00:00`);
+      const friday = new Date(monday); friday.setDate(friday.getDate() + 4);
+      return when >= monday && when <= friday;
+    });
+    return found ? found.week : null;
+  };
+  const rows = [...events].sort((a, b) =>
+    String(a.date + a.start).localeCompare(String(b.date + b.start)));
+  $('tpAgendaSummary').textContent = `Assessment radar - ${rows.length} dated item${rows.length === 1 ? '' : 's'}`;
+  $('tpAssessments').innerHTML = rows.map(event => {
+    const when = new Date(`${event.date}T00:00:00`);
+    const week = weekFor(event.date);
+    const slot = event.start
+      ? `${event.start}${event.end ? '-' + event.end : ''}` : 'time TBA';
+    const source = event.origin === 'drive' || String(event.source_id || '').startsWith('drive:')
+      ? 'course document' : 'announcement';
+    return `<div class="tpAgendaRow">
+      <span class="tpAgendaWeek">${week ? 'WK ' + week : 'EXAM'}</span>
+      <span>${esc(when.toLocaleDateString([], {weekday:'short', day:'numeric', month:'short'}))}</span>
+      <span class="tpAgendaWhen">${esc(slot)}</span>
+      <span class="tpAgendaMeta"><span class="tpAgendaCourse">${esc(event.course)}</span>
+        &middot; ${esc(event.details || String(event.kind || '').toUpperCase())}
+        <span class="muted"> &middot; ${esc(source)}</span>
+        ${event.amended ? '<span class="tpAmended">amended</span>' : ''}
+      </span>
+    </div>`;
+  }).join('') || '<div class="muted" style="padding:9px">No dated assessments detected.</div>';
 }
 
 // The upload prompt is a start-of-semester chore, not permanent furniture: show it
@@ -2575,6 +2935,8 @@ function renderScheduleSource(sc) {
 function renderTemporalDay(s, active, selectedDate, today, selectedWeek) {
   const sc = s.schedule || {};
   const rows = (selectedWeek || {})[active] || [];
+  const dateKey = tpLocalDateKey(selectedDate);
+  const events = (sc.important_dates || []).filter(event => event.date === dateKey);
 
   const allRows = ((sc.all_week || {})[active] || []).length;
   const hidden = allRows - rows.length;
@@ -2583,7 +2945,7 @@ function renderTemporalDay(s, active, selectedDate, today, selectedWeek) {
     + (active === today ? ' · today' : '')
     + (hidden > 0 ? ` · ${hidden} not this week` : '');
 
-  if (!rows.length) {
+  if (!rows.length && !events.length) {
     $('tpDaySchedule').innerHTML = sc.count
       ? `<span class="muted" style="font-size:12px">No classes on ${TP_FULL[active]}.</span>`
       : '<span class="muted" style="font-size:12px">No schedule imported. Run '
@@ -2600,7 +2962,17 @@ function renderTemporalDay(s, active, selectedDate, today, selectedWeek) {
   const isToday = active === today;
   const nextIdx = isToday ? rows.findIndex(r => toMin(r.start) > nowMin) : -1;
 
-  $('tpDaySchedule').innerHTML = rows.map((r, i) => {
+  const eventRows = events.map(event => `<div class="tpItem dynamic">
+      <span class="when">${esc(event.start || 'DATE')}<br><span class="muted">${esc(event.end || '')}</span></span>
+      <span class="what">${esc(event.course)} ${esc(String(event.kind || '').toUpperCase())}
+        <span class="meta">${esc(event.details || event.source_title || '')}</span>
+        <span class="tpChange">${event.amended ? 'Announcement amendment' :
+          ((event.origin === 'drive' || String(event.source_id || '').startsWith('drive:'))
+            ? 'Course document' : 'NTULearn announcement')}</span>
+      </span>
+      <span class="where">${esc(event.venue || '')}</span>
+    </div>`).join('');
+  $('tpDaySchedule').innerHTML = eventRows + rows.map((r, i) => {
     const past = isToday && toMin(r.end) < nowMin;
     const isNext = i === nextIdx;
     const soon = isNext && toMin(r.start) - nowMin < 120;
@@ -2898,6 +3270,12 @@ let materialSnapshotData = '';
 let materialCaptureCanvas = null;
 let materialCaptureStream = null;
 let materialCaptureVideo = null;
+// Floor and ceiling for a lassoed crop's longer side, in pixels. A small
+// selection (one equation, lassoed at a low PDF zoom) is upscaled up to
+// MIN_LASSO_CROP_PX so FRIDAY isn't reading exponents/fractions off a
+// handful of native pixels; a large one is still capped at MAX_LASSO_CROP_PX.
+const MIN_LASSO_CROP_PX = 900;
+const MAX_LASSO_CROP_PX = 1600;
 let materialNoteVersion = '';
 let materialNoteTimer = null;
 let materialNoteDirty = false;
@@ -2931,7 +3309,7 @@ function scrollMaterialChat() {
 
 function switchStudyPane(name) {
   const panes = {notes:'notesTab', friday:'fridayTab', graph:'graphTab',
-                compendium:'compendiumTab'};
+                prob:'probTab', compendium:'compendiumTab'};
   if (!panes[name]) name = 'notes';
   Object.keys(panes).forEach(key => {
     $(panes[key]).setAttribute('aria-selected', String(key === name));
@@ -2942,6 +3320,7 @@ function switchStudyPane(name) {
   if (name === 'notes') $('notesEditor').focus();
   else if (name === 'friday') $('materialChatQuestion').focus();
   else if (name === 'graph') window.ensureSurfaceDashboard();
+  else if (name === 'prob') ensureStochasticDashboard();
   else if (name === 'compendium') $('compendiumPrompt').focus();
 }
 
@@ -3024,7 +3403,9 @@ function scheduleMaterialNoteSave() {
 function openMaterial(item) {
   materialItem = item;
   const graphCourse = codeFrom(item.rel_path || '');
-  $('graphTab').hidden = !(graphCourse && graphCourse.startsWith('MH'));
+  const isMathCourse = graphCourse && graphCourse.startsWith('MH');
+  $('graphTab').hidden = !isMathCourse;
+  $('probTab').hidden = !isMathCourse;
   closeNoteReadOnly();
   $('materialTitle').textContent = item.rel_path;
   $('materialTitle').title = item.rel_path;
@@ -3089,9 +3470,22 @@ async function captureMaterialFrame() {
   }
   try {
     if (!materialCaptureStream || materialCaptureStream.getVideoTracks()[0]?.readyState !== 'live') {
-      materialCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+      const stream = await navigator.mediaDevices.getDisplayMedia({
         video:{displaySurface:'browser', selfBrowserSurface:'include'}, audio:false
       });
+      // displaySurface:'browser' above is only a hint to the share picker - a
+      // student can still choose a different window or their whole screen.
+      // The crop math below assumes the capture's (0,0) is this tab's (0,0),
+      // so a mismatched surface would silently crop unrelated screen content
+      // instead of the lassoed equation. Catch that here instead.
+      const settings = stream.getVideoTracks()[0].getSettings();
+      if (settings.displaySurface && settings.displaySurface !== 'browser') {
+        stream.getTracks().forEach(track => track.stop());
+        alert('Pick "This Tab" in the share prompt (not a window or your whole '
+          + 'screen) so the lasso crops the right spot - then try again.');
+        return false;
+      }
+      materialCaptureStream = stream;
       materialCaptureVideo = document.createElement('video');
       materialCaptureVideo.srcObject = materialCaptureStream;
       materialCaptureVideo.muted = true;
@@ -3119,7 +3513,7 @@ async function startMaterialLasso() {
   $('lassoLayer').setAttribute('aria-hidden', 'false');
 }
 
-// Bridge for the surface-dashboard module (Graph tab): materialItem and
+// Bridge for the surface-dashboard module (Telemetry tab): materialItem and
 // materialSnapshotData are classic-script `let` bindings, invisible to an ES
 // module script, so the handful of things it needs are exposed here rather
 // than duplicating the lasso/snapshot machinery.
@@ -3163,10 +3557,15 @@ $('lassoLayer').addEventListener('pointerup', ev => {
   const scaleX = materialCaptureCanvas.width / window.innerWidth;
   const scaleY = materialCaptureCanvas.height / window.innerHeight;
   const sourceWidth = Math.round(width * scaleX), sourceHeight = Math.round(height * scaleY);
-  const shrink = Math.min(1, 1600 / Math.max(sourceWidth, sourceHeight));
+  const longSide = Math.max(sourceWidth, sourceHeight);
+  const cropScale = longSide > MAX_LASSO_CROP_PX ? MAX_LASSO_CROP_PX / longSide
+    : longSide < MIN_LASSO_CROP_PX ? MIN_LASSO_CROP_PX / longSide : 1;
   const crop = document.createElement('canvas');
-  crop.width = Math.round(sourceWidth * shrink); crop.height = Math.round(sourceHeight * shrink);
-  crop.getContext('2d').drawImage(materialCaptureCanvas, Math.round(left*scaleX), Math.round(top*scaleY), sourceWidth, sourceHeight, 0, 0, crop.width, crop.height);
+  crop.width = Math.round(sourceWidth * cropScale); crop.height = Math.round(sourceHeight * cropScale);
+  const cropCtx = crop.getContext('2d');
+  cropCtx.imageSmoothingEnabled = true;
+  cropCtx.imageSmoothingQuality = 'high';
+  cropCtx.drawImage(materialCaptureCanvas, Math.round(left*scaleX), Math.round(top*scaleY), sourceWidth, sourceHeight, 0, 0, crop.width, crop.height);
   materialSnapshotData = crop.toDataURL('image/jpeg', .82);
   $('materialSnapshotImage').src = materialSnapshotData;
   $('materialSnapshot').classList.add('ready');
@@ -3178,6 +3577,7 @@ $('materialSnapshotRemove').onclick = clearMaterialSnapshot;
 $('notesTab').onclick = () => switchStudyPane('notes');
 $('fridayTab').onclick = () => switchStudyPane('friday');
 $('graphTab').onclick = () => switchStudyPane('graph');
+$('probTab').onclick = () => switchStudyPane('prob');
 $('compendiumTab').onclick = () => switchStudyPane('compendium');
 $('notesEditor').addEventListener('input', scheduleMaterialNoteSave);
 function noteInsertPage() {
@@ -3958,6 +4358,1417 @@ async function refresh() {
 }
 refresh();
 setInterval(refresh, 1200);
+
+// ── Stochastic (MH2500 distributions + calculator, formerly "Probability") ─
+// Self-contained like Research: no imports needed here (plain canvas, no
+// Three.js), so unlike Graph/Lab this lives directly in the classic script
+// instead of its own module. Shown for the same "MH"-prefixed course
+// materials as the Telemetry tab - see openMaterial(). Covers MH2500's own
+// syllabus: discrete binomial/hypergeometric/Poisson and continuous
+// normal/exponential, each behind one shared PROB_DISTRIBUTIONS interface
+// so the chart, calculator and param form don't need a per-distribution
+// branch anywhere except how they're actually computed.
+const PROB_MAX_N = 200; // keeps discrete charts legible and CDF loops cheap
+
+// log(n choose k) via an iterative product-of-ratios sum rather than a
+// gamma function - exact for any integer n this UI allows, without the
+// precision loss a general lgamma approximation risks for small n.
+function logBinomCoeff(n, k) {
+  if (k < 0 || k > n) return -Infinity;
+  k = Math.min(k, n - k);
+  let logC = 0;
+  for (let i = 1; i <= k; i++) logC += Math.log(n - k + i) - Math.log(i);
+  return logC;
+}
+function binomialPmf(n, p, k) {
+  if (!Number.isInteger(k) || k < 0 || k > n) return 0;
+  if (p <= 0) return k === 0 ? 1 : 0;
+  if (p >= 1) return k === n ? 1 : 0;
+  return Math.exp(logBinomCoeff(n, k) + k * Math.log(p) + (n - k) * Math.log(1 - p));
+}
+function binomialCdf(n, p, k) {
+  if (k < 0) return 0;
+  if (k >= n) return 1;
+  let sum = 0;
+  for (let i = 0; i <= k; i++) sum += binomialPmf(n, p, i);
+  return Math.min(1, sum);
+}
+function hypergeomSupport(N, K, n) {
+  return {lo: Math.max(0, n - (N - K)), hi: Math.max(0, Math.min(n, K))};
+}
+function hypergeomPmf(N, K, n, k) {
+  if (!Number.isInteger(k) || N <= 0 || n > N || K > N) return 0;
+  const {lo, hi} = hypergeomSupport(N, K, n);
+  if (k < lo || k > hi) return 0;
+  return Math.exp(logBinomCoeff(K, k) + logBinomCoeff(N - K, n - k) - logBinomCoeff(N, n));
+}
+function hypergeomCdf(N, K, n, k) {
+  const {lo, hi} = hypergeomSupport(N, K, n);
+  if (k < lo) return 0;
+  if (k >= hi) return 1;
+  let sum = 0;
+  for (let i = lo; i <= k; i++) sum += hypergeomPmf(N, K, n, i);
+  return Math.min(1, sum);
+}
+function logFactorial(k) {
+  let s = 0;
+  for (let i = 2; i <= k; i++) s += Math.log(i);
+  return s;
+}
+function poissonPmf(lambda, k) {
+  if (!Number.isInteger(k) || k < 0) return 0;
+  if (lambda <= 0) return k === 0 ? 1 : 0;
+  return Math.exp(-lambda + k * Math.log(lambda) - logFactorial(k));
+}
+function poissonCdf(lambda, k) {
+  if (k < 0) return 0;
+  let sum = 0;
+  for (let i = 0; i <= k; i++) sum += poissonPmf(lambda, i);
+  return Math.min(1, sum);
+}
+// Where the PMF has visually decayed to ~nothing - Poisson has no fixed
+// upper bound, so the chart needs one to actually draw bars.
+function poissonSupportHi(lambda) {
+  return Math.max(10, Math.min(PROB_MAX_N, Math.ceil(lambda + 8 * Math.sqrt(lambda || 1) + 5)));
+}
+// Abramowitz-Stegun 7.1.26 - good to ~1.5e-7, plenty for a study aid.
+function erf(x) {
+  const sign = x < 0 ? -1 : 1;
+  x = Math.abs(x);
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741,
+        a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const t = 1 / (1 + p * x);
+  const y = 1 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*Math.exp(-x*x);
+  return sign * y;
+}
+function normalPdf(mu, sigma, x) {
+  if (sigma <= 0) return 0;
+  const z = (x - mu) / sigma;
+  return Math.exp(-0.5 * z * z) / (sigma * Math.sqrt(2 * Math.PI));
+}
+function normalCdf(mu, sigma, x) {
+  if (sigma <= 0) return x < mu ? 0 : 1;
+  return 0.5 * (1 + erf((x - mu) / (sigma * Math.SQRT2)));
+}
+function exponentialPdf(lambda, x) {
+  if (x < 0 || lambda <= 0) return 0;
+  return lambda * Math.exp(-lambda * x);
+}
+function exponentialCdf(lambda, x) {
+  if (lambda <= 0) return 0;
+  return x < 0 ? 0 : 1 - Math.exp(-lambda * x);
+}
+function geometricPmf(p, k) {
+  if (!Number.isInteger(k) || k < 1 || p <= 0 || p > 1) return 0;
+  return Math.pow(1 - p, k - 1) * p;
+}
+function geometricCdf(p, k) {
+  if (k < 1) return 0;
+  return 1 - Math.pow(1 - p, Math.floor(k));
+}
+// No fixed upper bound (support is all of 1, 2, 3, ...) - stop once the tail
+// past k is under 0.1%, same idea as poissonSupportHi.
+function geometricSupportHi(p) {
+  if (p >= 1) return 1;
+  return Math.max(10, Math.min(PROB_MAX_N, Math.ceil(Math.log(0.001) / Math.log(1 - p))));
+}
+function uniformPdf(a, b, x) {
+  if (b <= a) return 0;
+  return (x >= a && x <= b) ? 1 / (b - a) : 0;
+}
+function uniformCdf(a, b, x) {
+  if (b <= a) return x < a ? 0 : 1;
+  if (x < a) return 0;
+  if (x > b) return 1;
+  return (x - a) / (b - a);
+}
+// Lanczos approximation to ln Gamma(z), g=7 - the standard coefficient set
+// (Numerical Recipes / Wikipedia). Works in log space so it stays finite for
+// the alpha values this tab lets someone type, unlike exponentiating Gamma(z)
+// directly which overflows a double past z ≈ 171.
+const LANCZOS_G = 7;
+const LANCZOS_P = [
+  0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+  771.32342877765313, -176.61502916214059, 12.507343278686905,
+  -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+];
+function lnGamma(z) {
+  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - lnGamma(1 - z);
+  z -= 1;
+  let x = LANCZOS_P[0];
+  for (let i = 1; i < LANCZOS_G + 2; i++) x += LANCZOS_P[i] / (z + i);
+  const t = z + LANCZOS_G + 0.5;
+  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
+}
+// Regularized lower incomplete gamma P(a, x) = the Gamma(alpha, lambda) CDF
+// at x = lambda·t. Series form converges fast for x < a+1; the continued
+// fraction (via its complement Q = 1-P) converges fast the rest of the way -
+// same split Numerical Recipes' gammp/gammq use, so precision stays good
+// across the whole range instead of just near the mean.
+function regularizedGammaP(a, x) {
+  if (a <= 0 || x < 0) return 0;
+  if (x === 0) return 0;
+  const lnPrefix = -x + a * Math.log(x) - lnGamma(a);
+  if (x < a + 1) {
+    let ap = a, sum = 1 / a, del = sum;
+    for (let n = 1; n <= 200; n++) {
+      ap += 1;
+      del *= x / ap;
+      sum += del;
+      if (Math.abs(del) < Math.abs(sum) * 1e-12) break;
+    }
+    return sum * Math.exp(lnPrefix);
+  }
+  const FPMIN = 1e-300;
+  let b = x + 1 - a, c = 1 / FPMIN, d = 1 / b, h = d;
+  for (let i = 1; i <= 200; i++) {
+    const an = -i * (i - a);
+    b += 2;
+    d = an * d + b; if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = b + an / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d;
+    const del = d * c;
+    h *= del;
+    if (Math.abs(del - 1) < 1e-12) break;
+  }
+  return 1 - Math.exp(lnPrefix) * h;
+}
+function gammaPdf(alpha, lambda, x) {
+  if (x <= 0 || alpha <= 0 || lambda <= 0) return 0;
+  return Math.exp(alpha * Math.log(lambda) - lnGamma(alpha) + (alpha - 1) * Math.log(x) - lambda * x);
+}
+function gammaCdf(alpha, lambda, x) {
+  if (alpha <= 0 || lambda <= 0) return 0;
+  return Math.min(1, regularizedGammaP(alpha, lambda * x));
+}
+
+const PROB_DISTRIBUTIONS = {
+  binomial: {
+    label: 'Binomial(n, p)', kind: 'discrete',
+    params: [
+      {id: 'n', label: 'n (trials)', min: 0, max: PROB_MAX_N, step: 1, default: 10},
+      {id: 'p', label: 'p (success probability)', min: 0, max: 1, step: 0.01, default: 0.5},
+    ],
+    support: p => ({lo: 0, hi: p.n}),
+    pmf: (p, k) => binomialPmf(p.n, p.p, k),
+    cdf: (p, k) => binomialCdf(p.n, p.p, k),
+    mean: p => p.n * p.p,
+    variance: p => p.n * p.p * (1 - p.p),
+  },
+  poisson: {
+    label: 'Poisson(λ)', kind: 'discrete',
+    params: [{id: 'lambda', label: 'λ (mean rate)', min: 0, max: 1000, step: 0.1, default: 4}],
+    support: p => ({lo: 0, hi: poissonSupportHi(p.lambda)}),
+    pmf: (p, k) => poissonPmf(p.lambda, k),
+    cdf: (p, k) => poissonCdf(p.lambda, k),
+    mean: p => p.lambda,
+    variance: p => p.lambda,
+  },
+  geometric: {
+    label: 'Geometric(p)', kind: 'discrete',
+    params: [{id: 'p', label: 'p (success probability)', min: 0.001, max: 1, step: 0.01, default: 0.3}],
+    support: p => ({lo: 1, hi: geometricSupportHi(p.p)}),
+    pmf: (p, k) => geometricPmf(p.p, k),
+    cdf: (p, k) => geometricCdf(p.p, k),
+    mean: p => 1 / p.p,
+    variance: p => (1 - p.p) / (p.p * p.p),
+  },
+  hypergeometric: {
+    label: 'Hypergeometric(N, K, n)', kind: 'discrete',
+    params: [
+      {id: 'N', label: 'N (population size)', min: 1, max: PROB_MAX_N, step: 1, default: 50},
+      {id: 'K', label: 'K (successes in population)', min: 0, max: PROB_MAX_N, step: 1, default: 20},
+      {id: 'n', label: 'n (draws)', min: 0, max: PROB_MAX_N, step: 1, default: 10},
+    ],
+    support: p => hypergeomSupport(p.N, p.K, p.n),
+    pmf: (p, k) => hypergeomPmf(p.N, p.K, p.n, k),
+    cdf: (p, k) => hypergeomCdf(p.N, p.K, p.n, k),
+    mean: p => p.n * p.K / p.N,
+    variance: p => { const q = p.K / p.N; return p.n * q * (1 - q) * ((p.N - p.n) / (p.N - 1 || 1)); },
+    invalid: p => (p.K > p.N || p.n > p.N) ? 'K and n must each be ≤ N' : null,
+  },
+  uniform: {
+    label: 'Uniform(a, b)', kind: 'continuous',
+    params: [
+      {id: 'a', label: 'a (lower bound)', min: -1000, max: 1000, step: 0.1, default: 0},
+      {id: 'b', label: 'b (upper bound)', min: -1000, max: 1000, step: 0.1, default: 1},
+    ],
+    domain: p => ({lo: Math.min(p.a, p.b), hi: Math.max(p.a, p.b)}),
+    pdf: (p, x) => uniformPdf(p.a, p.b, x),
+    cdf: (p, x) => uniformCdf(p.a, p.b, x),
+    mean: p => (p.a + p.b) / 2,
+    variance: p => Math.pow(p.b - p.a, 2) / 12,
+    invalid: p => p.b <= p.a ? 'b must be greater than a' : null,
+  },
+  normal: {
+    label: 'Normal(μ, σ²)', kind: 'continuous',
+    params: [
+      {id: 'mu', label: 'μ (mean)', min: -1000, max: 1000, step: 0.1, default: 0},
+      {id: 'sigma', label: 'σ (std dev)', min: 0.01, max: 1000, step: 0.1, default: 1},
+    ],
+    domain: p => ({lo: p.mu - 4 * p.sigma, hi: p.mu + 4 * p.sigma}),
+    pdf: (p, x) => normalPdf(p.mu, p.sigma, x),
+    cdf: (p, x) => normalCdf(p.mu, p.sigma, x),
+    mean: p => p.mu,
+    variance: p => p.sigma * p.sigma,
+  },
+  exponential: {
+    label: 'Exponential(λ)', kind: 'continuous',
+    params: [{id: 'lambda', label: 'λ (rate)', min: 0.01, max: 100, step: 0.01, default: 1}],
+    domain: p => ({lo: 0, hi: 5 / p.lambda}),
+    pdf: (p, x) => exponentialPdf(p.lambda, x),
+    cdf: (p, x) => exponentialCdf(p.lambda, x),
+    mean: p => 1 / p.lambda,
+    variance: p => 1 / (p.lambda * p.lambda),
+  },
+  gamma: {
+    label: 'Gamma(α, λ)', kind: 'continuous',
+    params: [
+      {id: 'alpha', label: 'α (shape)', min: 0.1, max: 100, step: 0.1, default: 2},
+      {id: 'lambda', label: 'λ (rate)', min: 0.01, max: 100, step: 0.01, default: 1},
+    ],
+    domain: p => ({lo: 0, hi: (p.alpha + 4 * Math.sqrt(p.alpha)) / p.lambda}),
+    pdf: (p, x) => gammaPdf(p.alpha, p.lambda, x),
+    cdf: (p, x) => gammaCdf(p.alpha, p.lambda, x),
+    mean: p => p.alpha / p.lambda,
+    variance: p => p.alpha / (p.lambda * p.lambda),
+  },
+};
+
+const probState = {dist: 'binomial', params: {}, at: 5, initialized: false};
+function currentProbDist() { return PROB_DISTRIBUTIONS[probState.dist]; }
+
+function drawProbAxes(ctx, W, H, padL, padT, padR, plotW, plotH, maxY) {
+  ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = 1;
+  ctx.font = '10px ui-monospace, monospace'; ctx.fillStyle = 'rgba(255,255,255,.5)';
+  for (let g = 0; g <= 4; g++) {
+    const v = (maxY * g) / 4;
+    const y = padT + plotH - (v / maxY) * plotH;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+    ctx.fillText(v.toFixed(3), 2, y + 3);
+  }
+}
+function drawDiscreteBars(ctx, W, H, dist, params, at) {
+  const {lo, hi} = dist.support(params);
+  const count = Math.max(0, hi - lo) + 1;
+  const pmfs = [];
+  let maxPmf = 0;
+  for (let i = 0; i < count; i++) { const v = dist.pmf(params, lo + i); pmfs.push(v); if (v > maxPmf) maxPmf = v; }
+  maxPmf = maxPmf || 1;
+  const padL = 44, padB = 20, padT = 10, padR = 10;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  drawProbAxes(ctx, W, H, padL, padT, padR, plotW, plotH, maxPmf);
+  const barGap = Math.max(1, (plotW / count) * 0.15);
+  const barW = Math.max(1, plotW / count - barGap);
+  const labelEvery = count > 40 ? Math.ceil(count / 20) : (count > 20 ? 2 : 1);
+  for (let i = 0; i < count; i++) {
+    const k = lo + i;
+    const x = padL + (plotW * i) / count + barGap / 2;
+    const h = (pmfs[i] / maxPmf) * plotH;
+    ctx.fillStyle = k === at ? '#ffb347' : '#38d3ff';
+    ctx.fillRect(x, padT + plotH - h, barW, h);
+    if (i % labelEvery === 0 || i === count - 1) {
+      ctx.fillStyle = 'rgba(255,255,255,.5)';
+      ctx.fillText(String(k), x, H - 6);
+    }
+  }
+}
+function drawContinuousCurve(ctx, W, H, dist, params, at) {
+  const {lo, hi} = dist.domain(params);
+  const steps = 200;
+  const xs = [], ys = [];
+  let maxY = 0;
+  for (let i = 0; i <= steps; i++) {
+    const x = lo + ((hi - lo) * i) / steps;
+    const y = dist.pdf(params, x);
+    xs.push(x); ys.push(y);
+    if (Number.isFinite(y) && y > maxY) maxY = y;
+  }
+  maxY = maxY || 1;
+  const padL = 44, padB = 20, padT = 10, padR = 10;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  drawProbAxes(ctx, W, H, padL, padT, padR, plotW, plotH, maxY);
+  const toPx = x => padL + ((x - lo) / ((hi - lo) || 1)) * plotW;
+  const toPy = y => padT + plotH - (y / maxY) * plotH;
+  ctx.beginPath();
+  ctx.moveTo(toPx(xs[0]), padT + plotH);
+  for (let i = 0; i < xs.length; i++) ctx.lineTo(toPx(xs[i]), toPy(ys[i]));
+  ctx.lineTo(toPx(xs[xs.length - 1]), padT + plotH);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(56,211,255,.18)';
+  ctx.fill();
+  ctx.beginPath();
+  for (let i = 0; i < xs.length; i++) {
+    const px = toPx(xs[i]), py = toPy(ys[i]);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.strokeStyle = '#38d3ff'; ctx.lineWidth = 2; ctx.stroke();
+  if (at >= lo && at <= hi) {
+    const px = toPx(at);
+    ctx.strokeStyle = '#ffb347'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + plotH); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,.5)';
+  ctx.fillText(lo.toFixed(1), padL, H - 6);
+  ctx.fillText(hi.toFixed(1), W - padR - 24, H - 6);
+}
+function renderProbParamFields() {
+  const dist = currentProbDist();
+  $('probParams').innerHTML = dist.params.map(p => `
+    <div class="surfaceField">
+      <label for="probParam_${p.id}">${esc(p.label)}</label>
+      <input type="number" id="probParam_${p.id}" min="${p.min}" max="${p.max}" step="${p.step}" value="${probState.params[p.id]}">
+    </div>`).join('');
+  dist.params.forEach(p => $(`probParam_${p.id}`).addEventListener('input', renderProbPmf));
+}
+function readProbInputs() {
+  const dist = currentProbDist();
+  dist.params.forEach(p => {
+    const v = Number($(`probParam_${p.id}`).value);
+    probState.params[p.id] = Number.isFinite(v) ? Math.max(p.min, Math.min(p.max, v)) : probState.params[p.id];
+  });
+  const atRaw = Number($('probK').value);
+  if (dist.kind === 'discrete') {
+    const {lo, hi} = dist.support(probState.params);
+    const rounded = Math.round(atRaw);
+    probState.at = Number.isFinite(rounded) ? Math.max(lo, Math.min(hi, rounded)) : probState.at;
+  } else {
+    const {lo, hi} = dist.domain(probState.params);
+    probState.at = Number.isFinite(atRaw) ? Math.max(lo, Math.min(hi, atRaw)) : probState.at;
+  }
+}
+function renderProbPmf() {
+  readProbInputs();
+  const dist = currentProbDist();
+  const params = probState.params, at = probState.at;
+  const canvas = $('probPmfCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (dist.kind === 'discrete') drawDiscreteBars(ctx, canvas.width, canvas.height, dist, params, at);
+  else drawContinuousCurve(ctx, canvas.width, canvas.height, dist, params, at);
+
+  if (dist.kind === 'discrete') {
+    $('probPmfLabel').textContent = 'P(X = k)';
+    $('probPmfVal').textContent = dist.pmf(params, at).toFixed(4);
+    $('probCdfLeLabel').textContent = 'P(X ≤ k)';
+    $('probCdfGeLabel').textContent = 'P(X ≥ k)';
+    $('probCdfLe').textContent = dist.cdf(params, at).toFixed(4);
+    $('probCdfGe').textContent = (1 - dist.cdf(params, at - 1)).toFixed(4);
+  } else {
+    $('probPmfLabel').textContent = 'f(x)';
+    $('probPmfVal').textContent = dist.pdf(params, at).toFixed(4);
+    $('probCdfLeLabel').textContent = 'P(X ≤ x)';
+    $('probCdfGeLabel').textContent = 'P(X ≥ x)';
+    $('probCdfLe').textContent = dist.cdf(params, at).toFixed(4);
+    $('probCdfGe').textContent = (1 - dist.cdf(params, at)).toFixed(4);
+  }
+  const variance = dist.variance(params);
+  $('probMean').textContent = dist.mean(params).toFixed(3);
+  $('probVar').textContent = variance.toFixed(3);
+  $('probStd').textContent = Math.sqrt(Math.max(0, variance)).toFixed(3);
+  $('probStatus').textContent = (dist.invalid && dist.invalid(params)) || '';
+}
+function setProbDistribution(distKey) {
+  const dist = PROB_DISTRIBUTIONS[distKey];
+  probState.dist = distKey;
+  probState.params = Object.fromEntries(dist.params.map(p => [p.id, p.default]));
+  renderProbParamFields();
+  const atInput = $('probK');
+  if (dist.kind === 'discrete') {
+    $('probKLabel').textContent = 'k';
+    atInput.step = '1';
+    probState.at = Math.round(dist.mean(probState.params));
+  } else {
+    $('probKLabel').textContent = 'x';
+    atInput.step = '0.01';
+    probState.at = dist.mean(probState.params);
+  }
+  atInput.value = probState.at;
+  $('probColTitle').textContent = `${dist.label}: ${dist.kind === 'discrete' ? 'PMF' : 'PDF'}`;
+  $('probHint').textContent = dist.kind === 'discrete'
+    ? `Bars show P(X = k) for a ${dist.label} variable; the selected k is highlighted.`
+    : `The curve shows the density f(x) for a ${dist.label} variable; the vertical line marks the selected x.`;
+  renderProbPmf();
+}
+let probWired = false;
+function wireProbControls() {
+  if (probWired) return;
+  probWired = true;
+  $('probDist').addEventListener('change', () => setProbDistribution($('probDist').value));
+  $('probK').addEventListener('input', renderProbPmf);
+}
+function ensureProbDashboard() {
+  wireProbControls();
+  if (!probState.initialized) {
+    probState.initialized = true;
+    setProbDistribution(probState.dist);
+  } else {
+    renderProbPmf();
+  }
+}
+
+// ── Joint distributions (Ch6) ──────────────────────────────────────────────
+// Two independent input modes sharing one pane: an editable joint-PMF table
+// for the discrete case, and a typed f(x, y) expression (reusing the exact
+// parser/preview the Telemetry tab uses) for the continuous case. Both sides
+// render the same idea - marginal (blue) vs. conditional-at-the-current-point
+// (orange) - so "do these two curves/bars coincide" is the one visual habit
+// that answers "are X and Y independent" in either mode.
+function fmtLabel(v) { return Number.isInteger(v) ? String(v) : String(Math.round(v * 1000) / 1000); }
+
+// ── Discrete: editable joint PMF table ──────────────────────────────────────
+const JOINT_DEFAULT_X = [0, 1, 2];
+const JOINT_DEFAULT_Y = [0, 1, 2];
+// Deliberately not independent (p(0,0)=.10 but P(X=0)P(Y=0)=.04) so the
+// independence check has something to say the first time the tab opens.
+const JOINT_DEFAULT_P = [
+  [0.10, 0.08, 0.02],
+  [0.08, 0.20, 0.12],
+  [0.02, 0.12, 0.26],
+];
+function cloneJointDefault() {
+  return {xVals: JOINT_DEFAULT_X.slice(), yVals: JOINT_DEFAULT_Y.slice(),
+          p: JOINT_DEFAULT_P.map(row => row.slice())};
+}
+const jointState = {
+  mode: 'discrete',
+  discrete: Object.assign({condX: 0, condY: 0}, cloneJointDefault()),
+  continuous: {
+    exprText: '(x<y)*2', fn: null, ax: 0, bx: 1, ay: 0, by: 1,
+    x0: 0.3, y0: 0.6, autoNormalize: true, _grid: null, _mxArr: null, _myArr: null,
+  },
+  initialized: false,
+};
+
+function jointMarginX(d) { return d.xVals.map((_, xi) => d.yVals.reduce((s, _y, yi) => s + d.p[yi][xi], 0)); }
+function jointMarginY(d) { return d.yVals.map((_, yi) => d.xVals.reduce((s, _x, xi) => s + d.p[yi][xi], 0)); }
+function jointMoments(d) {
+  const mx = jointMarginX(d), my = jointMarginY(d);
+  const eX = d.xVals.reduce((s, x, i) => s + x * mx[i], 0);
+  const eY = d.yVals.reduce((s, y, i) => s + y * my[i], 0);
+  const eX2 = d.xVals.reduce((s, x, i) => s + x * x * mx[i], 0);
+  const eY2 = d.yVals.reduce((s, y, i) => s + y * y * my[i], 0);
+  let eXY = 0;
+  d.yVals.forEach((y, yi) => d.xVals.forEach((x, xi) => { eXY += x * y * d.p[yi][xi]; }));
+  const varX = eX2 - eX * eX, varY = eY2 - eY * eY, cov = eXY - eX * eY;
+  const corr = (varX > 0 && varY > 0) ? cov / Math.sqrt(varX * varY) : NaN;
+  return {mx, my, eX, eY, varX, varY, cov, corr};
+}
+function renderJointTable() {
+  const d = jointState.discrete;
+  d.condX = Math.max(0, Math.min(d.condX, d.xVals.length - 1));
+  d.condY = Math.max(0, Math.min(d.condY, d.yVals.length - 1));
+  let html = '<thead><tr><th class="jointCorner">Y \\ X</th>';
+  d.xVals.forEach((v, xi) => {
+    html += `<th><input type="number" class="jointHeaderInput${xi === d.condX ? ' selected' : ''}" data-axis="x" data-i="${xi}" value="${v}" step="any"></th>`;
+  });
+  html += '<th class="jointMargin">P(Y=y)</th></tr></thead><tbody>';
+  d.yVals.forEach((yv, yi) => {
+    html += `<tr><th><input type="number" class="jointHeaderInput${yi === d.condY ? ' selected' : ''}" data-axis="y" data-i="${yi}" value="${yv}" step="any"></th>`;
+    d.xVals.forEach((xv, xi) => {
+      html += `<td class="jointCell"><input type="number" data-y="${yi}" data-x="${xi}" value="${d.p[yi][xi]}" step="0.01"></td>`;
+    });
+    html += `<td class="jointMargin" id="jointMarginY_${yi}">0.000</td></tr>`;
+  });
+  html += '<tr><th class="jointMargin">P(X=x)</th>';
+  d.xVals.forEach((_, xi) => { html += `<td class="jointMargin" id="jointMarginX_${xi}">0.000</td>`; });
+  html += '<td class="jointCorner" id="jointGrandTotal">0.000</td></tr></tbody>';
+  $('jointTable').innerHTML = html;
+  updateJointDiscreteDerived();
+}
+function renderJointIndependence(d, mx, my) {
+  let worst = {gap: 0, xi: 0, yi: 0};
+  d.yVals.forEach((_, yi) => d.xVals.forEach((_, xi) => {
+    const gap = Math.abs(d.p[yi][xi] - mx[xi] * my[yi]);
+    if (gap > worst.gap) worst = {gap, xi, yi};
+  }));
+  const el = $('jointDiscreteIndependence');
+  if (worst.gap < 1e-6) {
+    el.innerHTML = '<span class="jointTotalOk">✓ Independent</span> - every cell equals the product of its marginals.';
+  } else {
+    const x = fmtLabel(d.xVals[worst.xi]), y = fmtLabel(d.yVals[worst.yi]);
+    el.innerHTML = `<span class="jointTotalBad">✗ Not independent</span> - e.g. P(X=${x}, Y=${y}) = ${d.p[worst.yi][worst.xi].toFixed(4)}, `
+      + `but P(X=${x})·P(Y=${y}) = ${(mx[worst.xi] * my[worst.yi]).toFixed(4)}.`;
+  }
+}
+function renderJointBars(d, mx, my) {
+  const xLabels = d.xVals.map(fmtLabel), yLabels = d.yVals.map(fmtLabel);
+  const myCondY = my[d.condY] || 0;
+  const condXGivenY = d.xVals.map((_, xi) => myCondY > 0 ? d.p[d.condY][xi] / myCondY : 0);
+  drawGroupedBars($('jointBarX'), xLabels, mx, condXGivenY);
+  const mxCondX = mx[d.condX] || 0;
+  const condYGivenX = d.yVals.map((_, yi) => mxCondX > 0 ? d.p[yi][d.condX] / mxCondX : 0);
+  drawGroupedBars($('jointBarY'), yLabels, my, condYGivenX);
+  $('jointBarXHint').textContent = `Blue = marginal P(X=x). Orange = conditional P(X=x | Y=${fmtLabel(d.yVals[d.condY])}).`;
+  $('jointBarYHint').textContent = `Blue = marginal P(Y=y). Orange = conditional P(Y=y | X=${fmtLabel(d.xVals[d.condX])}).`;
+}
+function drawGroupedBars(canvas, labels, seriesA, seriesB) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const maxY = Math.max(0.0001, ...seriesA, ...seriesB);
+  const padL = 44, padB = 20, padT = 10, padR = 10;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  drawProbAxes(ctx, W, H, padL, padT, padR, plotW, plotH, maxY);
+  const n = labels.length, slot = plotW / n;
+  const barW = Math.max(1, slot * 0.32), gap = slot * 0.06;
+  for (let i = 0; i < n; i++) {
+    const slotX = padL + slot * i;
+    const hA = (seriesA[i] / maxY) * plotH, hB = (seriesB[i] / maxY) * plotH;
+    ctx.fillStyle = '#38d3ff';
+    ctx.fillRect(slotX + slot / 2 - barW - gap / 2, padT + plotH - hA, barW, hA);
+    ctx.fillStyle = '#ffb347';
+    ctx.fillRect(slotX + slot / 2 + gap / 2, padT + plotH - hB, barW, hB);
+    ctx.fillStyle = 'rgba(255,255,255,.5)';
+    ctx.fillText(labels[i], slotX + slot / 2 - 8, H - 6);
+  }
+}
+function updateJointDiscreteDerived() {
+  const d = jointState.discrete;
+  const {mx, my, eX, eY, varX, varY, cov, corr} = jointMoments(d);
+  d.xVals.forEach((_, xi) => { const el = $(`jointMarginX_${xi}`); if (el) el.textContent = mx[xi].toFixed(3); });
+  d.yVals.forEach((_, yi) => { const el = $(`jointMarginY_${yi}`); if (el) el.textContent = my[yi].toFixed(3); });
+  const total = mx.reduce((a, b) => a + b, 0);
+  const ok = Math.abs(total - 1) < 0.005;
+  const totalEl = $('jointGrandTotal');
+  totalEl.textContent = total.toFixed(3);
+  totalEl.className = 'jointCorner ' + (ok ? 'jointTotalOk' : 'jointTotalBad');
+  $('jointDiscreteStatus').textContent = ok ? ''
+    : `Probabilities sum to ${total.toFixed(3)}, not 1 - click Normalize to rescale.`;
+  $('jointDiscreteStats').innerHTML = `
+    <div class="chip"><span class="k">E[X]</span><span class="v">${eX.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">Var[X]</span><span class="v">${varX.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">E[Y]</span><span class="v">${eY.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">Var[Y]</span><span class="v">${varY.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">Cov(X,Y)</span><span class="v">${cov.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">Corr(X,Y)</span><span class="v">${Number.isFinite(corr) ? corr.toFixed(3) : '—'}</span></div>`;
+  renderJointIndependence(d, mx, my);
+  renderJointBars(d, mx, my);
+}
+function jointAddCol() {
+  const d = jointState.discrete;
+  if (d.xVals.length >= 8) { $('jointDiscreteStatus').textContent = 'Up to 8 x values.'; return; }
+  d.xVals.push(d.xVals.length ? d.xVals[d.xVals.length - 1] + 1 : 0);
+  d.p.forEach(row => row.push(0));
+  renderJointTable();
+}
+function jointRemoveCol() {
+  const d = jointState.discrete;
+  if (d.xVals.length <= 1) return;
+  d.xVals.pop();
+  d.p.forEach(row => row.pop());
+  d.condX = Math.min(d.condX, d.xVals.length - 1);
+  renderJointTable();
+}
+function jointAddRow() {
+  const d = jointState.discrete;
+  if (d.yVals.length >= 8) { $('jointDiscreteStatus').textContent = 'Up to 8 y values.'; return; }
+  d.yVals.push(d.yVals.length ? d.yVals[d.yVals.length - 1] + 1 : 0);
+  d.p.push(d.xVals.map(() => 0));
+  renderJointTable();
+}
+function jointRemoveRow() {
+  const d = jointState.discrete;
+  if (d.yVals.length <= 1) return;
+  d.yVals.pop();
+  d.p.pop();
+  d.condY = Math.min(d.condY, d.yVals.length - 1);
+  renderJointTable();
+}
+function jointNormalize() {
+  const d = jointState.discrete;
+  const total = d.p.reduce((s, row) => s + row.reduce((a, b) => a + b, 0), 0);
+  if (total <= 0) { $('jointDiscreteStatus').textContent = 'All probabilities are 0 - nothing to normalize.'; return; }
+  d.p = d.p.map(row => row.map(v => v / total));
+  renderJointTable();
+}
+function jointResetExample() {
+  jointState.discrete = Object.assign({condX: 0, condY: 0}, cloneJointDefault());
+  renderJointTable();
+}
+function jointTableInputHandler(ev) {
+  const t = ev.target;
+  if (t.tagName !== 'INPUT') return;
+  const d = jointState.discrete;
+  if (t.classList.contains('jointHeaderInput')) {
+    const v = Number(t.value);
+    if (!Number.isFinite(v)) return;
+    const i = Number(t.dataset.i);
+    if (t.dataset.axis === 'x') d.xVals[i] = v; else d.yVals[i] = v;
+  } else if (t.dataset.y !== undefined) {
+    const yi = Number(t.dataset.y), xi = Number(t.dataset.x);
+    const v = Number(t.value);
+    d.p[yi][xi] = Number.isFinite(v) ? v : 0;
+  } else {
+    return;
+  }
+  updateJointDiscreteDerived();
+}
+// Focusing a header - by click or Tab - both edits that value's label and
+// picks it as what the bar charts below condition on, so there's one target
+// per axis instead of a separate "select to condition" control alongside it.
+function jointTableFocusHandler(ev) {
+  const t = ev.target;
+  if (!t.classList || !t.classList.contains('jointHeaderInput')) return;
+  const d = jointState.discrete;
+  const i = Number(t.dataset.i);
+  if (t.dataset.axis === 'x') d.condX = i; else d.condY = i;
+  document.querySelectorAll('#jointTable .jointHeaderInput').forEach(inp => {
+    const sel = (inp.dataset.axis === 'x' && Number(inp.dataset.i) === d.condX)
+      || (inp.dataset.axis === 'y' && Number(inp.dataset.i) === d.condY);
+    inp.classList.toggle('selected', sel);
+  });
+  updateJointDiscreteDerived();
+}
+
+// ── Continuous: typed f(x, y) over a rectangle ─────────────────────────────
+const JOINT_GRID_N = 90;
+// A density can't be negative; a bad read (parse error mid-typo, or a
+// genuinely negative expression) renders as 0 rather than corrupting every
+// downstream integral - same "safe fallback" evaluateSurface uses above.
+function jointEvalSafe(fn, x, y) {
+  let v;
+  try { v = fn(x, y); } catch (e) { v = 0; }
+  return (Number.isFinite(v) && v > 0) ? v : 0;
+}
+function computeJointGrid(state) {
+  const {fn, ax, bx, ay, by} = state;
+  const N = JOINT_GRID_N;
+  const dx = (bx - ax) / N, dy = (by - ay) / N;
+  const grid = new Float64Array(N * N);
+  let integral = 0, maxV = 0;
+  for (let j = 0; j < N; j++) {
+    const y = ay + (j + 0.5) * dy;
+    for (let i = 0; i < N; i++) {
+      const x = ax + (i + 0.5) * dx;
+      const v = jointEvalSafe(fn, x, y);
+      grid[j * N + i] = v;
+      integral += v;
+      if (v > maxV) maxV = v;
+    }
+  }
+  integral *= dx * dy;
+  return {grid, dx, dy, ax, ay, integral, maxV, N};
+}
+function jointMarginalXArray(g, normFactor) {
+  const N = g.N, arr = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    let s = 0;
+    for (let j = 0; j < N; j++) s += g.grid[j * N + i];
+    arr[i] = (s * g.dy) / normFactor;
+  }
+  return arr;
+}
+function jointMarginalYArray(g, normFactor) {
+  const N = g.N, arr = new Float64Array(N);
+  for (let j = 0; j < N; j++) {
+    let s = 0;
+    for (let i = 0; i < N; i++) s += g.grid[j * N + i];
+    arr[j] = (s * g.dx) / normFactor;
+  }
+  return arr;
+}
+// A conditional density is self-normalizing (dividing by the slice's own
+// integral), so it's correct regardless of the auto-normalize toggle, which
+// only affects the marginals/moments below.
+function jointConditionalXGivenY(fn, ax, bx, y0, N) {
+  const dx = (bx - ax) / N, arr = new Float64Array(N);
+  let total = 0;
+  for (let i = 0; i < N; i++) { const v = jointEvalSafe(fn, ax + (i + 0.5) * dx, y0); arr[i] = v; total += v; }
+  total *= dx;
+  if (total > 1e-12) for (let i = 0; i < N; i++) arr[i] /= total;
+  return arr;
+}
+function jointConditionalYGivenX(fn, ay, by, x0, N) {
+  const dy = (by - ay) / N, arr = new Float64Array(N);
+  let total = 0;
+  for (let j = 0; j < N; j++) { const v = jointEvalSafe(fn, x0, ay + (j + 0.5) * dy); arr[j] = v; total += v; }
+  total *= dy;
+  if (total > 1e-12) for (let j = 0; j < N; j++) arr[j] /= total;
+  return arr;
+}
+function jointContinuousMoments(g, normFactor) {
+  const {ax, ay, dx, dy, grid, N} = g;
+  let eX = 0, eY = 0, eX2 = 0, eY2 = 0, eXY = 0;
+  for (let j = 0; j < N; j++) {
+    const y = ay + (j + 0.5) * dy;
+    for (let i = 0; i < N; i++) {
+      const x = ax + (i + 0.5) * dx;
+      const w = grid[j * N + i] * dx * dy / normFactor;
+      eX += x * w; eY += y * w; eX2 += x * x * w; eY2 += y * y * w; eXY += x * y * w;
+    }
+  }
+  const varX = eX2 - eX * eX, varY = eY2 - eY * eY, cov = eXY - eX * eY;
+  const corr = (varX > 0 && varY > 0) ? cov / Math.sqrt(varX * varY) : NaN;
+  return {eX, eY, varX, varY, cov, corr};
+}
+function jointContinuousIndependenceCheck(g, mxArr, myArr, normFactor) {
+  const N = g.N;
+  let maxAbsGap = 0;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const gap = Math.abs(g.grid[j * N + i] / normFactor - mxArr[i] * myArr[j]);
+      if (gap > maxAbsGap) maxAbsGap = gap;
+    }
+  }
+  return {maxAbsGap};
+}
+function renderJointHeatmap() {
+  const s = jointState.continuous, g = s._grid;
+  if (!g) return;
+  const canvas = $('jointHeatmap'), ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height, N = g.N;
+  const cellW = W / N, cellH = H / N;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const t = g.maxV > 0 ? g.grid[j * N + i] / g.maxV : 0;
+      const [r, gc, b] = colorForT(t);
+      ctx.fillStyle = `rgb(${r},${gc},${b})`;
+      // Grid row j=0 sits at ay (bottom of the math domain); flip vertically
+      // so larger y draws higher on screen, matching ordinary axes.
+      ctx.fillRect(i * cellW, H - (j + 1) * cellH, cellW, cellH);
+    }
+  }
+  const px = ((s.x0 - s.ax) / ((s.bx - s.ax) || 1)) * W;
+  const py = H - ((s.y0 - s.ay) / ((s.by - s.ay) || 1)) * H;
+  ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,.55)';
+  ctx.beginPath(); ctx.moveTo(px - 9, py); ctx.lineTo(px + 9, py); ctx.moveTo(px, py - 9); ctx.lineTo(px, py + 9); ctx.stroke();
+  ctx.lineWidth = 2; ctx.strokeStyle = '#ffb347';
+  ctx.beginPath(); ctx.moveTo(px - 9, py); ctx.lineTo(px + 9, py); ctx.moveTo(px, py - 9); ctx.lineTo(px, py + 9); ctx.stroke();
+}
+function drawTwoCurves(canvas, lo, hi, marginalArr, conditionalArr, atValue) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const N = marginalArr.length;
+  let maxY = 0;
+  for (let i = 0; i < N; i++) maxY = Math.max(maxY, marginalArr[i], conditionalArr[i]);
+  maxY = maxY || 1;
+  const padL = 44, padB = 20, padT = 10, padR = 10;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  drawProbAxes(ctx, W, H, padL, padT, padR, plotW, plotH, maxY);
+  const toPx = i => padL + (plotW * i) / (N - 1);
+  const toPy = v => padT + plotH - (v / maxY) * plotH;
+  ctx.beginPath(); ctx.moveTo(toPx(0), padT + plotH);
+  for (let i = 0; i < N; i++) ctx.lineTo(toPx(i), toPy(marginalArr[i]));
+  ctx.lineTo(toPx(N - 1), padT + plotH); ctx.closePath();
+  ctx.fillStyle = 'rgba(56,211,255,.18)'; ctx.fill();
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) { const px = toPx(i), py = toPy(marginalArr[i]); i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py); }
+  ctx.strokeStyle = '#38d3ff'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) { const px = toPx(i), py = toPy(conditionalArr[i]); i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py); }
+  ctx.strokeStyle = '#ffb347'; ctx.lineWidth = 2; ctx.stroke();
+  if (atValue != null) {
+    const px = padL + ((atValue - lo) / ((hi - lo) || 1)) * plotW;
+    ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + plotH); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,.5)';
+  ctx.fillText(lo.toFixed(1), padL, H - 6);
+  ctx.fillText(hi.toFixed(1), W - padR - 24, H - 6);
+}
+// Cheap per-point refresh - conditionals + crosshair - called on every drag
+// frame. The grid, marginals, moments and independence readout only depend
+// on f/bounds/auto-normalize, so recomputeJointContinuous() is the one that
+// rebuilds those, mirroring rebuildSurfaceFunction vs renderSurfaceFrame above.
+function updateJointPoint() {
+  const s = jointState.continuous;
+  if (!s._grid) return;
+  const N = s._grid.N;
+  const condXArr = jointConditionalXGivenY(s.fn, s.ax, s.bx, s.y0, N);
+  const condYArr = jointConditionalYGivenX(s.fn, s.ay, s.by, s.x0, N);
+  renderJointHeatmap();
+  drawTwoCurves($('jointCurveX'), s.ax, s.bx, s._mxArr, condXArr, s.x0);
+  drawTwoCurves($('jointCurveY'), s.ay, s.by, s._myArr, condYArr, s.y0);
+  const xEl = $('jointX0'), yEl = $('jointY0');
+  if (document.activeElement !== xEl) xEl.value = s.x0.toFixed(2);
+  if (document.activeElement !== yEl) yEl.value = s.y0.toFixed(2);
+}
+function recomputeJointContinuous() {
+  const s = jointState.continuous;
+  if (!s.fn) return;
+  const g = computeJointGrid(s);
+  s._grid = g;
+  const normFactor = (s.autoNormalize && g.integral > 1e-12) ? g.integral : 1;
+  $('jointFnStatus').textContent = (s.autoNormalize && g.integral <= 1e-12)
+    ? 'f is ~0 everywhere on this rectangle - widen the bounds or check the expression.' : '';
+  s._mxArr = jointMarginalXArray(g, normFactor);
+  s._myArr = jointMarginalYArray(g, normFactor);
+  const moments = jointContinuousMoments(g, normFactor);
+  $('jointContinuousStats').innerHTML = `
+    <div class="chip"><span class="k">∫∫f</span><span class="v">${g.integral.toFixed(4)}</span></div>
+    <div class="chip"><span class="k">E[X]</span><span class="v">${moments.eX.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">Var[X]</span><span class="v">${moments.varX.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">E[Y]</span><span class="v">${moments.eY.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">Var[Y]</span><span class="v">${moments.varY.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">Cov(X,Y)</span><span class="v">${moments.cov.toFixed(3)}</span></div>
+    <div class="chip"><span class="k">Corr(X,Y)</span><span class="v">${Number.isFinite(moments.corr) ? moments.corr.toFixed(3) : '—'}</span></div>`;
+  const indep = jointContinuousIndependenceCheck(g, s._mxArr, s._myArr, normFactor);
+  const scale = (g.maxV / normFactor) || 1;
+  const el = $('jointContinuousIndependence');
+  if (indep.maxAbsGap / scale < 0.02) {
+    el.innerHTML = `<span class="jointTotalOk">✓ Looks independent</span> - f(x,y) tracks f<sub>X</sub>(x)·f<sub>Y</sub>(y) closely everywhere sampled (max gap ${indep.maxAbsGap.toFixed(4)}). Numerical check on a grid, not a proof.`;
+  } else {
+    el.innerHTML = `<span class="jointTotalBad">✗ Not independent</span> - f(x,y) and f<sub>X</sub>(x)·f<sub>Y</sub>(y) differ by up to ${indep.maxAbsGap.toFixed(4)} on this grid. Compare the marginal and conditional curves below - where they diverge, X and Y are dependent.`;
+  }
+  updateJointPoint();
+}
+function updateJointFnPreview() {
+  const el = $('jointFnPreview');
+  const text = $('jointFnExpr').value.trim();
+  if (!text) { el.innerHTML = ''; el.classList.remove('stale'); return; }
+  let latex;
+  try { latex = astToLatex(parseExprTokens(tokenizeExpr(text))); }
+  catch (e) { el.classList.add('stale'); return; }
+  el.classList.remove('stale');
+  if (window.katex) {
+    try { window.katex.render(`f(x, y) = ${latex}`, el, {throwOnError:false, displayMode:true}); return; }
+    catch (e) { /* fall through to plain text below */ }
+  }
+  el.textContent = `f(x, y) = ${latex}`;
+}
+function applyJointExpression() {
+  const text = $('jointFnExpr').value.trim();
+  if (!text) { $('jointFnStatus').textContent = 'Enter a joint density f(x, y).'; return; }
+  let fn;
+  try { fn = compileFunction(text); }
+  catch (e) { $('jointFnStatus').textContent = `Could not use "${text}": ${e.message}`; return; }
+  jointState.continuous.exprText = text;
+  jointState.continuous.fn = fn;
+  recomputeJointContinuous();
+}
+function jointCanvasToMath(canvas, clientX, clientY) {
+  const s = jointState.continuous;
+  const rect = canvas.getBoundingClientRect();
+  const x = s.ax + ((clientX - rect.left) / rect.width) * (s.bx - s.ax);
+  const y = s.by - ((clientY - rect.top) / rect.height) * (s.by - s.ay);
+  return {x0: Math.max(s.ax, Math.min(s.bx, x)), y0: Math.max(s.ay, Math.min(s.by, y))};
+}
+function applyJointBounds() {
+  const s = jointState.continuous;
+  const ax = Number($('jointAx').value), bx = Number($('jointBx').value);
+  const ay = Number($('jointAy').value), by = Number($('jointBy').value);
+  if (![ax, bx, ay, by].every(Number.isFinite) || bx <= ax || by <= ay) {
+    $('jointFnStatus').textContent = 'Bounds must be finite, with each "to" greater than its "from".';
+    return;
+  }
+  s.ax = ax; s.bx = bx; s.ay = ay; s.by = by;
+  s.x0 = Math.max(ax, Math.min(bx, s.x0));
+  s.y0 = Math.max(ay, Math.min(by, s.y0));
+  recomputeJointContinuous();
+}
+function applyJointPoint() {
+  const s = jointState.continuous;
+  const x = Number($('jointX0').value), y = Number($('jointY0').value);
+  s.x0 = Number.isFinite(x) ? Math.max(s.ax, Math.min(s.bx, x)) : s.x0;
+  s.y0 = Number.isFinite(y) ? Math.max(s.ay, Math.min(s.by, y)) : s.y0;
+  updateJointPoint();
+}
+let jointHeatmapDragging = false;
+let jointContinuousWired = false;
+function wireJointContinuousControls() {
+  if (jointContinuousWired) return;
+  jointContinuousWired = true;
+  let exprTimer = null;
+  $('jointFnExpr').addEventListener('input', () => {
+    updateJointFnPreview();
+    clearTimeout(exprTimer);
+    exprTimer = setTimeout(applyJointExpression, 350);
+  });
+  $('jointFnExpr').addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter') return;
+    ev.preventDefault();
+    clearTimeout(exprTimer);
+    applyJointExpression();
+  });
+  for (const id of ['jointAx', 'jointBx', 'jointAy', 'jointBy']) {
+    $(id).addEventListener('change', applyJointBounds);
+    $(id).addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); applyJointBounds(); $(id).blur(); } });
+  }
+  for (const id of ['jointX0', 'jointY0']) {
+    $(id).addEventListener('change', applyJointPoint);
+    $(id).addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); applyJointPoint(); $(id).blur(); } });
+  }
+  $('jointAutoNormalize').addEventListener('change', () => {
+    jointState.continuous.autoNormalize = $('jointAutoNormalize').checked;
+    recomputeJointContinuous();
+  });
+  const canvas = $('jointHeatmap');
+  canvas.addEventListener('pointerdown', (ev) => {
+    jointHeatmapDragging = true;
+    canvas.setPointerCapture(ev.pointerId);
+    Object.assign(jointState.continuous, jointCanvasToMath(canvas, ev.clientX, ev.clientY));
+    updateJointPoint();
+  });
+  canvas.addEventListener('pointermove', (ev) => {
+    if (!jointHeatmapDragging) return;
+    Object.assign(jointState.continuous, jointCanvasToMath(canvas, ev.clientX, ev.clientY));
+    updateJointPoint();
+  });
+  canvas.addEventListener('pointerup', () => { jointHeatmapDragging = false; });
+  canvas.addEventListener('pointercancel', () => { jointHeatmapDragging = false; });
+}
+
+// ── Shared: mode toggle + entry point ───────────────────────────────────────
+function refreshActiveJointMode() {
+  if (jointState.mode === 'discrete') {
+    updateJointDiscreteDerived();
+  } else {
+    wireJointContinuousControls();
+    if (!jointState.continuous.fn) applyJointExpression();
+    else recomputeJointContinuous();
+  }
+}
+function setJointMode(mode) {
+  jointState.mode = mode === 'continuous' ? 'continuous' : 'discrete';
+  document.querySelectorAll('#probJointSection [data-joint-mode]').forEach(btn =>
+    btn.setAttribute('aria-pressed', String(btn.dataset.jointMode === jointState.mode)));
+  $('jointDiscreteSection').hidden = jointState.mode !== 'discrete';
+  $('jointContinuousSection').hidden = jointState.mode !== 'continuous';
+  refreshActiveJointMode();
+}
+let jointModeWired = false;
+function wireJointControls() {
+  if (jointModeWired) return;
+  jointModeWired = true;
+  document.querySelectorAll('#probJointSection [data-joint-mode]').forEach(btn =>
+    btn.addEventListener('click', () => setJointMode(btn.dataset.jointMode)));
+  $('jointTable').addEventListener('input', jointTableInputHandler);
+  $('jointTable').addEventListener('focusin', jointTableFocusHandler);
+  $('jointAddCol').addEventListener('click', jointAddCol);
+  $('jointRemoveCol').addEventListener('click', jointRemoveCol);
+  $('jointAddRow').addEventListener('click', jointAddRow);
+  $('jointRemoveRow').addEventListener('click', jointRemoveRow);
+  $('jointNormalize').addEventListener('click', jointNormalize);
+  $('jointResetExample').addEventListener('click', jointResetExample);
+}
+function ensureJointDashboard() {
+  wireJointControls();
+  if (!jointState.initialized) {
+    jointState.initialized = true;
+    renderJointTable();
+    updateJointFnPreview();
+  }
+  refreshActiveJointMode();
+}
+
+// ── Stochastic tab: single-distribution vs. joint-distribution tool ────────
+// One Ch4/5 PMF-PDF calculator, one Ch6 joint-distribution tool, under a
+// single "Stochastic" study tab rather than two - condenses the tab bar
+// without losing either mode; each keeps its own internal state/wiring
+// (probState / jointState) untouched, this just decides which is visible.
+let probToolMode = 'single';
+let probToolWired = false;
+function setProbToolMode(mode) {
+  probToolMode = mode === 'joint' ? 'joint' : 'single';
+  document.querySelectorAll('#probPane [data-stoch-mode]').forEach(btn =>
+    btn.setAttribute('aria-pressed', String(btn.dataset.stochMode === probToolMode)));
+  $('probSingleSection').hidden = probToolMode !== 'single';
+  $('probJointSection').hidden = probToolMode !== 'joint';
+  if (probToolMode === 'single') ensureProbDashboard(); else ensureJointDashboard();
+}
+function wireProbToolControls() {
+  if (probToolWired) return;
+  probToolWired = true;
+  document.querySelectorAll('#probPane [data-stoch-mode]').forEach(btn =>
+    btn.addEventListener('click', () => setProbToolMode(btn.dataset.stochMode)));
+}
+function ensureStochasticDashboard() {
+  wireProbToolControls();
+  if (probToolMode === 'single') ensureProbDashboard(); else ensureJointDashboard();
+}
+
+// ── Research (URECA proposal drafting) ─────────────────────────────────
+// Self-contained like Lab/Graph: its own state, its own full-screen
+// overlay, fetched lazily rather than riding the main 1.2s poll.
+const RESEARCH_DELIVERABLE_LABELS = {
+  integrity: 'Research integrity course', abstract: 'Abstract', poster: 'Poster',
+  paper: 'Final paper', reflection: 'Reflection',
+};
+const RESEARCH_CATEGORIES = ['URECA', 'IDR-URECA', 'CLRI-URECA'];
+const RESEARCH_STATUSES = [
+  ['drafting', 'Drafting'], ['sent', 'Sent to supervisor'],
+  ['registered', 'Registered'], ['completed', 'Completed'],
+];
+const researchState = {items: [], deadline: null, activeId: null, loaded: false,
+  suggestions: [], profileLoaded: false, saved: [], savedLoaded: false};
+let researchSaveTimer = null;
+let researchProfileSaveTimer = null;
+
+function researchDaysUntil(dateStr) {
+  if (!dateStr) return null;
+  return Math.ceil((new Date(dateStr + 'T23:59:59') - new Date()) / 86400000);
+}
+function formatResearchDeadline(dateStr) {
+  const days = researchDaysUntil(dateStr);
+  if (days == null) return '—';
+  if (days < 0) return dateStr;
+  if (days === 0) return 'today';
+  return `${dateStr} (${days}d)`;
+}
+async function refreshResearchSummary() {
+  try {
+    const data = await api('/api/research');
+    researchState.items = data.items || [];
+    researchState.deadline = data.deadline;
+    $('researchCount').textContent = researchState.items.length;
+    $('researchDeadline').textContent = formatResearchDeadline(data.deadline);
+  } catch (e) { /* reportInterfaceFailure already logged it */ }
+}
+function researchDeliverableChip(item, key) {
+  const done = !!(item.deliverables || {})[key];
+  return `<label class="researchDeliverable">
+    <input type="checkbox" data-deliverable="${key}" ${done ? 'checked' : ''}>
+    ${esc(RESEARCH_DELIVERABLE_LABELS[key])}
+  </label>`;
+}
+function renderResearchRows() {
+  $('researchRows').innerHTML = researchState.items.length
+    ? researchState.items.map(i => `
+        <div class="researchRow${i.id === researchState.activeId ? ' active' : ''}" data-id="${esc(i.id)}">
+          <div class="researchRowTitle">${esc(i.title)}</div>
+          <div class="researchRowMeta">${esc(i.category)} · ${esc(i.status)}</div>
+        </div>`).join('')
+    : '<div class="researchEmpty">No proposals yet - use "New proposal" to start one.</div>';
+}
+function researchSavedByTitle(title) {
+  return researchState.saved.find(s => s.title === title);
+}
+function renderResearchSavedRows() {
+  $('researchSavedCount').textContent = researchState.saved.length || '';
+  $('researchSavedRows').innerHTML = researchState.saved.length
+    ? researchState.saved.map(s => `
+        <div class="researchSavedRow" data-id="${esc(s.id)}">
+          <div class="researchSavedTitle">${esc(s.title)}</div>
+          <div class="researchSavedTopic">${esc(s.topic)}</div>
+          <div class="researchSavedActions">
+            <button type="button" class="primary" data-adopt-saved="${esc(s.id)}">Research this</button>
+            <button type="button" data-unstar="${esc(s.id)}" title="Remove from saved">Unstar</button>
+          </div>
+        </div>`).join('')
+    : '<div class="researchSavedEmpty">Star a suggested topic to keep it here across re-runs.</div>';
+  document.querySelectorAll('#researchSavedRows [data-adopt-saved]').forEach(btn => {
+    btn.onclick = () => adoptSavedTopic(btn.dataset.adoptSaved);
+  });
+  document.querySelectorAll('#researchSavedRows [data-unstar]').forEach(btn => {
+    btn.onclick = () => unstarSavedTopic(btn.dataset.unstar);
+  });
+}
+function renderResearchSuggestions() {
+  return `
+    <div class="researchSuggestIntro">Proposed for your research profile - pick one and it researches and fills the whole proposal in depth on its own. Star one to keep it past the next re-run.</div>
+    <div class="researchSuggestList">
+      ${researchState.suggestions.map((s, idx) => {
+        const saved = researchSavedByTitle(s.title);
+        return `
+        <div class="researchSuggestCard">
+          <div class="researchSuggestTitle">${esc(s.title)}</div>
+          <div class="researchSuggestTopic">${esc(s.topic)}</div>
+          <div class="researchSuggestActions">
+            <button type="button" class="primary" data-suggest-idx="${idx}">Research this</button>
+            <button type="button" class="researchStar${saved ? ' starred' : ''}" data-star-idx="${idx}">${saved ? '★ Saved' : '☆ Save'}</button>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+}
+function renderResearchForm() {
+  const item = researchState.items.find(i => i.id === researchState.activeId);
+  if (!item) {
+    $('researchFormArea').innerHTML = researchState.suggestions.length
+      ? renderResearchSuggestions()
+      : '<div class="researchEmpty">Select a proposal, use "Suggest topics" for AI-proposed ideas, or "New proposal" to start your own.</div>';
+    document.querySelectorAll('#researchFormArea [data-suggest-idx]').forEach(btn => {
+      btn.onclick = () => adoptResearchSuggestion(Number(btn.dataset.suggestIdx));
+    });
+    document.querySelectorAll('#researchFormArea [data-star-idx]').forEach(btn => {
+      btn.onclick = () => toggleStarSuggestion(Number(btn.dataset.starIdx));
+    });
+    return;
+  }
+  $('researchFormArea').innerHTML = `
+    <div class="researchTopRow">
+      <input type="text" id="rfTitle" value="${esc(item.title)}" placeholder="Project title">
+      <select id="rfCategory">${RESEARCH_CATEGORIES.map(c => `<option value="${c}" ${c === item.category ? 'selected' : ''}>${c}</option>`).join('')}</select>
+      <select id="rfStatus">${RESEARCH_STATUSES.map(([v, l]) => `<option value="${v}" ${v === item.status ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+    </div>
+    <div class="researchGrid">
+      <div class="researchField"><label>Supervisor</label><input type="text" id="rfSupervisor" value="${esc(item.supervisor)}"></div>
+      <div class="researchField"><label>School</label><input type="text" id="rfSchool" value="${esc(item.school)}"></div>
+    </div>
+    <div class="researchDraftBar">
+      <input type="text" id="researchTopic" placeholder="One-line idea, e.g. &quot;using ML to predict library seat demand&quot;">
+      <button type="button" id="researchDraftAi" class="primary"
+        title="Runs a single deep autonomous pass that fills every empty field below - background, objectives, methodology, outcomes, budget and timeline">
+        Run autonomous research</button>
+      <span class="muted" id="researchDraftStatus"></span>
+    </div>
+    <div class="researchField full"><label>Background &amp; motivation</label><textarea id="rfBackground">${esc(item.background)}</textarea></div>
+    <div class="researchField full"><label>Research objectives</label><textarea id="rfObjectives">${esc(item.objectives)}</textarea></div>
+    <div class="researchField full"><label>Methodology</label><textarea id="rfMethodology">${esc(item.methodology)}</textarea></div>
+    <div class="researchField full"><label>Expected outcomes</label><textarea id="rfOutcomes">${esc(item.outcomes)}</textarea></div>
+    <div class="researchGrid">
+      <div class="researchField"><label>Budget notes (consumables cap: $500)</label><textarea id="rfBudgetNotes">${esc(item.budgetNotes)}</textarea></div>
+      <div class="researchField"><label>Timeline (Aug – Jun)</label><textarea id="rfTimelineNotes">${esc(item.timelineNotes)}</textarea></div>
+    </div>
+    <div class="researchSectionHead">Assessment deliverables</div>
+    <div class="researchDeliverables">${Object.keys(RESEARCH_DELIVERABLE_LABELS).map(k => researchDeliverableChip(item, k)).join('')}</div>
+  `;
+  wireResearchForm(item.id);
+}
+function wireResearchForm(id) {
+  ['rfTitle', 'rfSupervisor', 'rfSchool', 'rfBackground', 'rfObjectives',
+   'rfMethodology', 'rfOutcomes', 'rfBudgetNotes', 'rfTimelineNotes'].forEach(fid => {
+    $(fid).addEventListener('input', () => scheduleResearchSave(id));
+  });
+  $('rfCategory').onchange = () => saveResearchField(id, {category: $('rfCategory').value});
+  $('rfStatus').onchange = () => saveResearchField(id, {status: $('rfStatus').value});
+  document.querySelectorAll('#researchFormArea [data-deliverable]').forEach(cb => {
+    cb.onchange = () => {
+      const item = researchState.items.find(i => i.id === id);
+      const deliverables = Object.assign({}, item.deliverables, {[cb.dataset.deliverable]: cb.checked});
+      saveResearchField(id, {deliverables});
+    };
+  });
+  $('researchDraftAi').onclick = () => runAutonomousResearch(id);
+}
+function scheduleResearchSave(id) {
+  clearTimeout(researchSaveTimer);
+  researchSaveTimer = setTimeout(() => flushResearchSave(id), 700);
+}
+function collectResearchFields() {
+  return {
+    title: $('rfTitle').value, supervisor: $('rfSupervisor').value, school: $('rfSchool').value,
+    background: $('rfBackground').value, objectives: $('rfObjectives').value,
+    methodology: $('rfMethodology').value, outcomes: $('rfOutcomes').value,
+    budgetNotes: $('rfBudgetNotes').value, timelineNotes: $('rfTimelineNotes').value,
+  };
+}
+async function flushResearchSave(id) {
+  clearTimeout(researchSaveTimer);
+  await saveResearchField(id, collectResearchFields());
+}
+async function saveResearchField(id, fields) {
+  try {
+    const data = await api('/api/research', Object.assign({action: 'update', id}, fields));
+    const idx = researchState.items.findIndex(i => i.id === id);
+    if (idx !== -1) researchState.items[idx] = data.items.find(i => i.id === id) || researchState.items[idx];
+    $('researchStatus').textContent = 'Saved';
+    renderResearchRows();
+  } catch (e) {
+    $('researchStatus').textContent = e.message;
+  }
+}
+async function runAutonomousResearch(id, topicOverride) {
+  const topic = topicOverride !== undefined ? topicOverride : $('researchTopic').value.trim();
+  if (!topic) { $('researchDraftStatus').textContent = 'Describe the idea first'; return; }
+  if (topicOverride !== undefined) $('researchTopic').value = topic;
+  $('researchDraftAi').disabled = true;
+  // One deep pass on the "scholar" tier (see ai_provider.TIERS) rather than a
+  // quick reformat, so this can genuinely take a couple of minutes.
+  $('researchDraftStatus').textContent = 'Researching… this can take a couple of minutes';
+  try {
+    const data = await api('/api/research/draft', {id, topic});
+    const idx = researchState.items.findIndex(i => i.id === id);
+    if (idx !== -1) researchState.items[idx] = data.item;
+    if (researchState.activeId === id) renderResearchForm();
+    $('researchDraftStatus').textContent = `Researched via ${data.backend || 'AI'}${data.model ? ' (' + data.model + ')' : ''}`;
+  } catch (e) {
+    $('researchDraftStatus').textContent = e.message;
+  } finally {
+    $('researchDraftAi').disabled = false;
+  }
+}
+async function createResearchProposal() {
+  const title = prompt('Project title:', '');
+  if (!title || !title.trim()) return;
+  try {
+    const data = await api('/api/research', {action: 'create', title});
+    researchState.items = data.items;
+    researchState.activeId = data.items[0].id; // newest is inserted at the front
+    renderResearchRows();
+    renderResearchForm();
+    refreshResearchSummary();
+  } catch (e) { $('researchStatus').textContent = e.message; }
+}
+async function deleteResearchProposal() {
+  if (!researchState.activeId) return;
+  if (!confirm('Delete this proposal? This cannot be undone.')) return;
+  try {
+    const data = await api('/api/research', {action: 'delete', id: researchState.activeId});
+    researchState.items = data.items;
+    researchState.activeId = (researchState.items[0] || {}).id || null;
+    renderResearchRows();
+    renderResearchForm();
+    refreshResearchSummary();
+  } catch (e) { $('researchStatus').textContent = e.message; }
+}
+async function suggestResearchTopics() {
+  $('researchSuggest').disabled = true;
+  $('researchStatus').textContent = 'Proposing topics for your research profile…';
+  try {
+    const data = await api('/api/research/suggest', {keywords: $('rpKeywords').value});
+    researchState.suggestions = data.suggestions || [];
+    researchState.activeId = null;
+    renderResearchRows();
+    renderResearchForm();
+    $('researchStatus').textContent = researchState.suggestions.length
+      ? `${researchState.suggestions.length} topic${researchState.suggestions.length === 1 ? '' : 's'} suggested via ${data.backend || 'AI'}`
+      : 'No topics suggested - try again';
+  } catch (e) {
+    $('researchStatus').textContent = e.message;
+  } finally {
+    $('researchSuggest').disabled = false;
+  }
+}
+async function adoptResearchSuggestion(idx) {
+  const s = researchState.suggestions[idx];
+  if (!s) return;
+  await adoptTopic(s.title, s.topic);
+}
+async function adoptTopic(title, topic) {
+  $('researchStatus').textContent = 'Creating proposal…';
+  try {
+    const created = await api('/api/research', {action: 'create', title});
+    researchState.items = created.items;
+    researchState.activeId = created.items[0].id; // newest is inserted at the front
+    researchState.suggestions = [];
+    renderResearchRows();
+    renderResearchForm();
+    refreshResearchSummary();
+    // The idea has graduated into a real proposal - a saved star for it is
+    // now just clutter alongside the proposal it produced.
+    const saved = researchSavedByTitle(title);
+    if (saved) await unstarSavedTopic(saved.id, {silent: true});
+    await runAutonomousResearch(researchState.activeId, topic);
+  } catch (e) {
+    $('researchStatus').textContent = e.message;
+  }
+}
+async function adoptSavedTopic(id) {
+  const s = researchState.saved.find(i => i.id === id);
+  if (!s) return;
+  await adoptTopic(s.title, s.topic);
+}
+async function toggleStarSuggestion(idx) {
+  const s = researchState.suggestions[idx];
+  if (!s) return;
+  const existing = researchSavedByTitle(s.title);
+  if (existing) {
+    await unstarSavedTopic(existing.id);
+    return;
+  }
+  try {
+    const data = await api('/api/research/saved', {action: 'star', title: s.title, topic: s.topic});
+    researchState.saved = data.items || [];
+    renderResearchSavedRows();
+    renderResearchForm();
+  } catch (e) {
+    $('researchStatus').textContent = e.message;
+  }
+}
+async function unstarSavedTopic(id, opts) {
+  try {
+    const data = await api('/api/research/saved', {action: 'unstar', id});
+    researchState.saved = data.items || [];
+    renderResearchSavedRows();
+    if (!(opts || {}).silent) renderResearchForm();
+  } catch (e) {
+    if (!(opts || {}).silent) $('researchStatus').textContent = e.message;
+  }
+}
+async function loadSavedTopics() {
+  try {
+    const data = await api('/api/research/saved');
+    researchState.saved = data.items || [];
+    researchState.savedLoaded = true;
+    renderResearchSavedRows();
+  } catch (e) { /* reportInterfaceFailure already logged it */ }
+}
+function fillResearchProfileFields(profile) {
+  $('rpProgramme').value = profile.programme || '';
+  $('rpYear').value = profile.year || '';
+  $('rpField').value = profile.field || '';
+  $('rpKeywords').value = profile.keywords || '';
+}
+async function loadResearchProfile() {
+  try {
+    const data = await api('/api/profile');
+    fillResearchProfileFields(data.profile || {});
+    researchState.profileLoaded = true;
+  } catch (e) { /* reportInterfaceFailure already logged it */ }
+}
+async function saveResearchProfile() {
+  try {
+    await api('/api/profile', {
+      programme: $('rpProgramme').value, year: $('rpYear').value, field: $('rpField').value,
+      keywords: $('rpKeywords').value});
+    $('researchProfileStatus').textContent = 'Saved';
+  } catch (e) {
+    $('researchProfileStatus').textContent = e.message;
+  }
+}
+function scheduleResearchProfileSave() {
+  clearTimeout(researchProfileSaveTimer);
+  $('researchProfileStatus').textContent = 'Saving…';
+  researchProfileSaveTimer = setTimeout(saveResearchProfile, 700);
+}
+function selectResearchProposal(id) {
+  researchState.activeId = id;
+  renderResearchRows();
+  renderResearchForm();
+}
+let researchWired = false;
+function wireResearch() {
+  if (researchWired) return;
+  researchWired = true;
+  $('researchRows').addEventListener('click', (ev) => {
+    const row = ev.target.closest('.researchRow');
+    if (row) selectResearchProposal(row.dataset.id);
+  });
+  $('researchSuggest').onclick = suggestResearchTopics;
+  $('researchNew').onclick = createResearchProposal;
+  $('researchDelete').onclick = deleteResearchProposal;
+  $('researchClose').onclick = closeResearch;
+  $('researchShade').onclick = closeResearch;
+  ['rpProgramme', 'rpYear', 'rpField', 'rpKeywords'].forEach(id => {
+    $(id).addEventListener('input', scheduleResearchProfileSave);
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && document.body.classList.contains('researchOpen')) closeResearch();
+  });
+}
+async function openResearch() {
+  wireResearch();
+  document.body.classList.add('researchOpen');
+  $('researchOverlay').setAttribute('aria-hidden', 'false');
+  if (!researchState.profileLoaded) loadResearchProfile();
+  if (!researchState.savedLoaded) loadSavedTopics();
+  if (!researchState.loaded) {
+    researchState.loaded = true;
+    try {
+      const data = await api('/api/research');
+      researchState.items = data.items || [];
+      researchState.deadline = data.deadline;
+      $('researchDeadlineFoot').textContent = 'Registers by ' + formatResearchDeadline(data.deadline);
+      if (researchState.items.length) researchState.activeId = researchState.items[0].id;
+    } catch (e) { /* reportInterfaceFailure already logged it */ }
+  }
+  renderResearchRows();
+  renderResearchSavedRows();
+  renderResearchForm();
+}
+function closeResearch() {
+  document.body.classList.remove('researchOpen');
+  $('researchOverlay').setAttribute('aria-hidden', 'true');
+}
+// Bound at script load, unlike every other Research control: wireResearch()
+// (which wires the rest) only runs once openResearch() has already fired
+// once, so this one button's handler can't live inside wireResearch()
+// without never firing - the same trap the Lab launcher hit earlier.
+$('researchOpen').onclick = openResearch;
+refreshResearchSummary();
 </script>
 
 <script type="importmap">
@@ -3974,7 +5785,7 @@ setInterval(refresh, 1200);
 }}
 </script>
 <script type="module">
-// ── Multivariable surface dashboard (Graph tab) ───────────────────────────
+// ── Multivariable surface dashboard (Telemetry tab, née Graph) ───────────
 // Self-contained ES module: it owns the whole 2D contour / 3D surface feature
 // and exposes a single entry point (window.ensureSurfaceDashboard) for the
 // classic script's switchStudyPane() to call. Isolated in a module because
@@ -4030,6 +5841,15 @@ function tokenizeExpr(src) {
       i = j;
       continue;
     }
+    // Comparisons exist for indicator functions on a joint density's support
+    // ("(x<y)*2" for the classic 0<x<y<1 triangle) - not for real algebra, so
+    // they aren't chainable and bind looser than everything else below.
+    if ('<>=!'.includes(c)) {
+      const two = s.slice(i, i + 2);
+      if (two === '<=' || two === '>=' || two === '==' || two === '!=') { tokens.push({type:'op', value:two}); i += 2; continue; }
+      if (c === '<' || c === '>') { tokens.push({type:'op', value:c}); i++; continue; }
+      throw new Error(`Unexpected character "${c}"`);
+    }
     if ('+-*/%^(),'.includes(c)) { tokens.push({type:'op', value:c}); i++; continue; }
     throw new Error(`Unexpected character "${c}"`);
   }
@@ -4067,6 +5887,18 @@ function parseExprTokens(tokens) {
     }
   };
   const isOp = (value) => { const t = peek(); return !!t && t.type === 'op' && t.value === value; };
+  const COMPARISON_OPS = ['<', '<=', '>', '>=', '==', '!='];
+  // Binds loosest of all, and deliberately doesn't chain (no "a<b<c") - this
+  // exists to build an indicator like (x<y)*2, not to express real algebra.
+  function parseComparison() {
+    const node = parseExpr();
+    const t = peek();
+    if (t && t.type === 'op' && COMPARISON_OPS.includes(t.value)) {
+      const op = next().value;
+      return {type:'bin', op, left:node, right:parseExpr()};
+    }
+    return node;
+  }
   function parseExpr() {
     let node = parseTerm();
     while (isOp('+') || isOp('-')) {
@@ -4105,18 +5937,18 @@ function parseExprTokens(tokens) {
         next();
         const args = [];
         if (!isOp(')')) {
-          args.push(parseExpr());
-          while (isOp(',')) { next(); args.push(parseExpr()); }
+          args.push(parseComparison());
+          while (isOp(',')) { next(); args.push(parseComparison()); }
         }
         expectOp(')');
         return {type:'call', name:t.value, args};
       }
       return {type:'var', name:t.value};
     }
-    if (isOp('(')) { next(); const node = parseExpr(); expectOp(')'); return node; }
+    if (isOp('(')) { next(); const node = parseComparison(); expectOp(')'); return node; }
     throw new Error(`Unexpected token "${t.value}"`);
   }
-  const ast = parseExpr();
+  const ast = parseComparison();
   if (pos !== tokens.length) throw new Error(`Unexpected trailing input near "${tokens[pos].value}"`);
   return ast;
 }
@@ -4132,6 +5964,81 @@ const EXPR_FUNCTIONS = {
 // Referenced by tokenizeExpr, defined above it in the file - fine, since
 // nothing calls tokenizeExpr until well after module evaluation finishes.
 const KNOWN_NAMES = new Set(['x', 'y', ...Object.keys(EXPR_CONSTANTS), ...Object.keys(EXPR_FUNCTIONS)]);
+
+// ── AST → LaTeX (live mirror of what got parsed, not the raw text) ────────
+// Renders the same tree compileFunction would evaluate, so a misread like
+// "sinx" (which the tokenizer above reads as four separate letters, not the
+// function sin) shows up as literally s\cdot i\cdot n\cdot x - visible at a
+// glance, instead of the student having to guess why the plot looks wrong.
+const LATEX_FN_MACRO = {
+  sin:'\\sin', cos:'\\cos', tan:'\\tan',
+  asin:'\\arcsin', acos:'\\arccos', atan:'\\arctan',
+  sinh:'\\sinh', cosh:'\\cosh', tanh:'\\tanh',
+  log:'\\log', ln:'\\ln', min:'\\min', max:'\\max',
+};
+function latexParen(s) { return `\\left(${s}\\right)`; }
+// Precedence used only to decide when a child needs \left(...\right) around
+// it - matches the grammar's own binding: +/- loosest, then */%, then unary,
+// then everything else (atoms and ^, which is handled separately below since
+// "does the base need parens" isn't a same-scale precedence question).
+const LATEX_COMPARISON_OPS = {'<':'<', '<=':'\\le', '>':'>', '>=':'\\ge', '==':'=', '!=':'\\ne'};
+function latexPrec(node) {
+  if (node.type === 'bin') {
+    if (node.op in LATEX_COMPARISON_OPS) return 0;
+    if (node.op === '+' || node.op === '-') return 1;
+    if (node.op === '*' || node.op === '/' || node.op === '%') return 2;
+  }
+  if (node.type === 'unary') return 3;
+  return 4;
+}
+function latexWrap(node, contextPrec, rightOfMinus) {
+  const s = astToLatex(node);
+  const needsParen = latexPrec(node) < contextPrec
+    || (rightOfMinus && node.type === 'bin' && (node.op === '+' || node.op === '-'));
+  return needsParen ? latexParen(s) : s;
+}
+function astToLatex(node) {
+  switch (node.type) {
+    case 'num': {
+      const v = node.value;
+      return Number.isInteger(v) ? String(v) : String(Math.round(v * 1e9) / 1e9);
+    }
+    case 'var':
+      return node.name === 'pi' ? '\\pi' : node.name;
+    case 'unary':
+      // Unary binds tighter than +/-, so its argument only needs parens if
+      // it's itself a + or - expression, e.g. -(a+b).
+      return `-${latexWrap(node.arg, 3, false)}`;
+    case 'bin': {
+      if (node.op in LATEX_COMPARISON_OPS) {
+        return `${latexWrap(node.left, 0, false)} ${LATEX_COMPARISON_OPS[node.op]} ${latexWrap(node.right, 0, false)}`;
+      }
+      if (node.op === '/') return `\\frac{${astToLatex(node.left)}}{${astToLatex(node.right)}}`;
+      if (node.op === '^') {
+        const base = (node.left.type === 'num' || node.left.type === 'var' || node.left.type === 'call')
+          ? astToLatex(node.left) : latexParen(astToLatex(node.left));
+        return `${base}^{${astToLatex(node.right)}}`;
+      }
+      if (node.op === '*') return `${latexWrap(node.left, 2, false)} \\cdot ${latexWrap(node.right, 2, false)}`;
+      if (node.op === '%') return `${latexWrap(node.left, 2, false)} \\bmod ${latexWrap(node.right, 2, false)}`;
+      return `${latexWrap(node.left, 1, false)} ${node.op} ${latexWrap(node.right, 1, node.op === '-')}`;
+    }
+    case 'call': {
+      const args = node.args.map(astToLatex);
+      if (node.name === 'sqrt') return `\\sqrt{${args[0] ?? ''}}`;
+      if (node.name === 'abs') return `\\left|${args[0] ?? ''}\\right|`;
+      if (node.name === 'floor') return `\\left\\lfloor ${args[0] ?? ''}\\right\\rfloor`;
+      if (node.name === 'ceil') return `\\left\\lceil ${args[0] ?? ''}\\right\\rceil`;
+      if (node.name === 'exp') return `e^{${args[0] ?? ''}}`;
+      if (node.name === 'log10') return `\\log_{10}${latexParen(args[0] ?? '')}`;
+      if (node.name === 'pow' && args.length === 2) return `${args[0]}^{${args[1]}}`;
+      const macro = LATEX_FN_MACRO[node.name];
+      return `${macro || '\\operatorname{' + node.name + '}'}${latexParen(args.join(', '))}`;
+    }
+    default:
+      return '{?}';
+  }
+}
 function evalExprNode(node, x, y) {
   switch (node.type) {
     case 'num': return node.value;
@@ -4149,6 +6056,12 @@ function evalExprNode(node, x, y) {
       if (node.op === '/') return a / b;
       if (node.op === '%') return a % b;
       if (node.op === '^') return Math.pow(a, b);
+      if (node.op === '<') return a < b ? 1 : 0;
+      if (node.op === '<=') return a <= b ? 1 : 0;
+      if (node.op === '>') return a > b ? 1 : 0;
+      if (node.op === '>=') return a >= b ? 1 : 0;
+      if (node.op === '==') return a === b ? 1 : 0;
+      if (node.op === '!=') return a !== b ? 1 : 0;
       throw new Error(`Unknown operator "${node.op}"`);
     }
     case 'call': {
@@ -4166,6 +6079,35 @@ function compileFunction(src) {
   if (typeof probe !== 'number') throw new Error('Expression must return a number');
   return fn;
 }
+function referencesVar(node, name) {
+  switch (node.type) {
+    case 'var': return node.name === name;
+    case 'unary': return referencesVar(node.arg, name);
+    case 'bin': return referencesVar(node.left, name) || referencesVar(node.right, name);
+    case 'call': return node.args.some(a => referencesVar(a, name));
+    default: return false;
+  }
+}
+// A restricted path is y = g(x) or x = g(y) - a single-variable curve
+// overlaid on both panels so a student can see whether f trends the same
+// way along several hand-picked approaches to the origin, not just the one
+// they last dragged. freeVar is whichever side of the "=" the student typed
+// an expression for; the other standard variable isn't defined yet, so it's
+// rejected rather than silently treated as 0 inside their expression.
+function compilePathFunction(src, freeVar) {
+  const boundVar = freeVar === 'x' ? 'y' : 'x';
+  const ast = parseExprTokens(tokenizeExpr(src));
+  if (referencesVar(ast, boundVar)) throw new Error(`Use ${freeVar} only - this expression is a function of ${freeVar}`);
+  const fn = freeVar === 'x' ? (t) => evalExprNode(ast, t, 0) : (t) => evalExprNode(ast, 0, t);
+  const probe = fn(0.37);
+  if (typeof probe !== 'number') throw new Error('Expression must return a number');
+  return fn;
+}
+// Maps a path's free-variable parameter t to a math (x, y) point, regardless
+// of which variable the path was defined in terms of.
+function pathPoint(path, t) {
+  return path.form === 'x-of-y' ? {x: path.fn(t), y: t} : {x: t, y: path.fn(t)};
+}
 // The origin (and any other removable singularity) reads as height 0 rather
 // than NaN/Infinity blowing up the plot - the safe "set z = 0" the spec asks
 // for, applied generically so a custom expression gets the same treatment.
@@ -4175,28 +6117,11 @@ function evaluateSurface(fn, x, y) {
   return Number.isFinite(z) ? z : 0;
 }
 
-// ── Default function, paths, color scale ──────────────────────────────────
-// f(x, y) starts as this textbook limit-does-not-exist example. It changes
-// two ways: FRIDAY reads one off a lassoed segment of the material
-// (lassoFunctionFromMaterial()), or the student edits the expression field
-// directly - either path recompiles through the same safe parser.
+// ── Default function, color scale ─────────────────────────────────────────
+// f(x, y) starts as this textbook limit-does-not-exist example; typing a new
+// expression into the field recompiles it through the same safe parser.
 const DEFAULT_SURFACE_FN = (x, y) => { const d = x*x + y*y; return d === 0 ? 0 : (2*x*y) / d; };
 const DEFAULT_SURFACE_EXPR = '2*x*y / (x^2 + y^2)';
-const SURFACE_PATHS = {
-  'y=x':  {label:'y = x',          point:(t) => ({x:t, y:t})},
-  'y=-x': {label:'y = −x',    point:(t) => ({x:t, y:-t})},
-  'y=0':  {label:'y = 0 (X-axis)', point:(t) => ({x:t, y:0})},
-  'x=0':  {label:'x = 0 (Y-axis)', point:(t) => ({x:0, y:t})},
-  'y=x2': {label:'y = x²',    point:(t) => ({x:t, y:t*t})},
-  // Slope reads from surfaceState at call time, not at module-eval time, so
-  // this stays live as the slider moves - see surfaceState.slope below.
-  'y=mx': {label:'y = m·x',   point:(t) => ({x:t, y:(surfaceState.slope ?? 1) * t})},
-};
-function formatSlope(m) { return (Math.round(m * 10) / 10).toFixed(1); }
-// The one path whose label depends on live state instead of being fixed text.
-function pathLabel(key) {
-  return key === 'y=mx' ? `y = ${formatSlope(surfaceState.slope)}·x` : SURFACE_PATHS[key].label;
-}
 const SURFACE_COLOR_STOPS = [
   [0x0b,0x1d,0x6b], [0x11,0x60,0xc9], [0x17,0xb6,0xa8], [0x7d,0xe2,0x4b], [0xff,0xe1,0x4d],
 ];
@@ -4213,140 +6138,32 @@ function colorForT(t) {
     Math.round(a[2] + (b[2]-a[2])*frac),
   ];
 }
-
-// ── Explanation text (item 4's "why paths disagree" alert box) ───────────
-// Exact algebra for the default example; a lassoed function gets a numeric
-// approach instead (describeSampledPath) since its closed form is unknown.
-const DEFAULT_PATH_LIMIT_TEXT = {
-  'y=x':  'Along y = x (x ≠ 0): f(x, x) = 2x² / 2x² = <strong>1</strong> at every point on the line.',
-  'y=-x': 'Along y = −x (x ≠ 0): f(x, −x) = −2x² / 2x² = <strong>−1</strong> at every point on the line.',
-  'y=0':  'Along y = 0: f(x, 0) = 0 / x² = <strong>0</strong> for every x ≠ 0.',
-  'x=0':  'Along x = 0: f(0, y) = 0 / y² = <strong>0</strong> for every y ≠ 0.',
-  'y=x2': 'Along y = x²: f(x, x²) = 2x³ / (x²(1 + x²)) = 2x / (1 + x²) → <strong>0</strong> as x → 0.',
-};
-const DEFAULT_CONCLUSION = 'Straight-line approaches give different heights (1, −1, 0…), so <strong>the two-variable limit at the origin does not exist</strong> - even though f(0, 0) is defined here as 0.';
-function describeSampledPath(fn, pathKey) {
-  const path = SURFACE_PATHS[pathKey];
-  const samples = [0.5, 0.1, 0.02, 0.004].map(t => {
-    const {x, y} = path.point(t);
-    return evaluateSurface(fn, x, y);
-  });
-  const last = samples[samples.length - 1];
-  return `Along ${esc(pathLabel(pathKey))}, f ≈ ${samples.map(v => v.toFixed(3)).join(' → ')} as the point approaches the origin - trending toward about <strong>${last.toFixed(3)}</strong>.`;
-}
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-function surfaceExplainHtml(state) {
-  if (!state.pathKey) return 'Pick a path to see how the height along it behaves as you approach the origin.';
-  // The hardcoded exact-algebra text only covers the five fixed paths on the
-  // shipped default function; the slider path (or any custom function) falls
-  // through to the numeric description below instead.
-  if (state.isDefault && DEFAULT_PATH_LIMIT_TEXT[state.pathKey]) {
-    return `${DEFAULT_PATH_LIMIT_TEXT[state.pathKey]} ${DEFAULT_CONCLUSION}`;
-  }
-  return describeSampledPath(state.fn, state.pathKey);
-}
-
-// ── Multi-path verdict (item 1-3: auto-evaluate every path, compare them,
-// render a table) ───────────────────────────────────────────────────────
-// A single-path animation can only ever show "here's the height along one
-// direction" - it can't by itself say whether the limit exists, since that
-// requires checking multiple directions agree. This runs the same
-// approach-the-origin sampling animateToOrigin() uses, but for every fixed
-// path (plus whatever the y=mx slider is currently set to) at once.
-const PATH_APPROACH_TS = [0.5, 0.2, 0.08, 0.032, 0.0128, 0.00512];
-function estimatePathLimit(fn, pathKey) {
-  const samples = PATH_APPROACH_TS.map(t => {
-    const {x, y} = SURFACE_PATHS[pathKey].point(t);
-    return evaluateSurface(fn, x, y);
-  });
-  const value = samples[samples.length - 1];
-  const prev = samples[samples.length - 2];
-  const settled = Number.isFinite(value) && Number.isFinite(prev)
-    && Math.abs(value - prev) < 1e-3 * Math.max(1, Math.abs(value));
-  return {samples, value, settled};
-}
-function computePathEstimates(fn) {
-  const out = {};
-  for (const key of Object.keys(SURFACE_PATHS)) out[key] = estimatePathLimit(fn, key);
-  return out;
-}
-// Disagreement beyond this (scaled to the values involved) is treated as a
-// real difference rather than sampling noise from the finite step sizes above.
-function pathDisagreementTolerance(values) {
-  return 1e-2 * Math.max(1, ...values.map(Math.abs));
-}
-function surfaceVerdictInfo(estimates) {
-  const keys = Object.keys(estimates).filter(k => Number.isFinite(estimates[k].value));
-  if (!keys.length) return {kind:'pending', html:'Could not evaluate this function along any path.'};
-  let loKey = keys[0], hiKey = keys[0];
-  for (const k of keys) {
-    if (estimates[k].value < estimates[loKey].value) loKey = k;
-    if (estimates[k].value > estimates[hiKey].value) hiKey = k;
-  }
-  const lo = estimates[loKey].value, hi = estimates[hiKey].value;
-  if (hi - lo > pathDisagreementTolerance([lo, hi])) {
-    return {
-      kind: 'no-limit',
-      html: `Paths disagree: along ${esc(pathLabel(loKey))}, f trends to <strong>${lo.toFixed(3)}</strong>, but `
-        + `along ${esc(pathLabel(hiKey))} it trends to <strong>${hi.toFixed(3)}</strong>. Different heights from `
-        + `different directions means <strong>the limit at the origin does not exist</strong>.`,
-    };
-  }
-  const avg = keys.reduce((s, k) => s + estimates[k].value, 0) / keys.length;
-  return {
-    kind: 'consistent',
-    html: `Every tested path trends to about <strong>${avg.toFixed(3)}</strong>. That's consistent with a limit of `
-      + `${avg.toFixed(3)} existing here - but agreement along finitely many paths never proves it, only `
-      + `disagreement disproves it. Try sweeping the y = m·x slider for a path that breaks the pattern.`,
-  };
-}
-// Flags rows whose value sits away from the pack, purely so the table draws
-// the eye to whichever paths are the ones disagreeing (or the outlier, if
-// only one is off) - independent of, and secondary to, surfaceVerdictInfo's
-// own lo/hi comparison above.
-function computeOutlierKeys(estimates) {
-  const keys = Object.keys(estimates).filter(k => Number.isFinite(estimates[k].value));
-  if (keys.length < 2) return new Set();
-  const sorted = keys.map(k => estimates[k].value).slice().sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  const tol = pathDisagreementTolerance(sorted);
-  return new Set(keys.filter(k => Math.abs(estimates[k].value - median) > tol));
-}
-function surfacePathTableHtml(estimates, activeKey, outlierKeys) {
-  return Object.keys(estimates).map(key => {
-    const est = estimates[key];
-    const v = Number.isFinite(est.value) ? est.value.toFixed(3) : '—';
-    const classes = ['surfacePathRow'];
-    if (key === activeKey) classes.push('active');
-    if (outlierKeys.has(key)) classes.push('outlier');
-    return `<div class="${classes.join(' ')}"><span class="surfacePathLabel">${esc(pathLabel(key))}</span>`
-      + `<span class="surfacePathValue">${v}</span></div>`;
-  }).join('');
-}
-function updateSurfaceVerdict() {
-  const estimates = surfaceState.pathEstimates;
-  if (!estimates) return;
-  const verdict = surfaceVerdictInfo(estimates);
-  const el = $('surfaceVerdict');
-  el.className = 'surfaceVerdict ' + verdict.kind;
-  el.innerHTML = verdict.html;
-  $('surfacePathTable').innerHTML =
-    surfacePathTableHtml(estimates, surfaceState.pathKey, computeOutlierKeys(estimates));
-}
+// This module has its own scope, separate from the classic <script> the rest
+// of the dashboard runs in (see window.ensureSurfaceDashboard below) - the
+// Joint tab's continuous mode reuses this same f(x, y) parser and color
+// scale rather than duplicating them, so it needs these reachable from there.
+window.compileFunction = compileFunction;
+window.tokenizeExpr = tokenizeExpr;
+window.parseExprTokens = parseExprTokens;
+window.astToLatex = astToLatex;
+window.colorForT = colorForT;
 
 // ── Unified state ──────────────────────────────────────────────────────────
 const surfaceState = {
   fn: DEFAULT_SURFACE_FN, exprText: DEFAULT_SURFACE_EXPR, isDefault: true,
-  pathKey: null,
   point: {x: 1.8, y: 1.1},
-  animating: false, lassoBusy: false,
-  gridN: 84, zGrid: null, zMin: -1, zMax: 1,
+  // 84 sampled a periodic f(x, y) at ~14 points/unit across this domain -
+  // fine for the textbook default, but anything with real oscillation
+  // (sin(8x), say) was already close to Nyquist, and much past that aliased
+  // into a moire pattern that looked nothing like the actual function. 180
+  // roughly doubles the frequency ceiling before that happens, for a rebuild
+  // cost (~33k evals vs ~7k) still well under a frame budget.
+  gridN: 180, zGrid: null, zMin: -1, zMax: 1,
   background: null,
-  slope: 1, // current m for the y = m·x slider path
-  pathEstimates: null, // {pathKey: {samples, value, settled}}, recomputed per function
+  paths: [], // {id, exprText, fn, color} - user-added y = g(x) overlays
 };
+const SURFACE_PATH_COLORS = ['#ffd166','#06d6a0','#a78bfa','#f4a261','#4cc9f0','#ef476f','#adff2f','#ff8fab'];
+let surfacePathIdSeq = 0;
 const SURFACE_TARGET_HEIGHT = 3.2;
 function surfaceVisualHeight(z, state) {
   return ((z - state.zMin) / ((state.zMax - state.zMin) || 1)) * SURFACE_TARGET_HEIGHT;
@@ -4397,38 +6214,57 @@ function drawAxes(ctx, W, H) {
 // sign change against the level and linearly interpolated. Saddle-ambiguous
 // cells (both diagonals crossing) are skipped rather than resolved - a rare
 // cosmetic gap in a study aid, not a numerical result anything depends on.
+//
+// Visits each cell once (not once per level) and skips a level entirely once
+// it's outside that cell's own [min, max] - it can't cross any of the 4
+// edges then, so there's nothing to check. Edges are checked inline instead
+// of building an `edges`/`pts` array of objects per cell per level: at the
+// resolution this tab now samples at, that was 9 levels x N^2 cells x 4
+// short-lived objects - over a million allocations for one rebuild, most of
+// them for levels that never touch the cell at all.
 function drawContourLines(ctx, state, W, H) {
   const N = state.gridN, levels = 9;
-  const range = (state.zMax - state.zMin) || 1;
-  const at = (i, j) => state.zGrid[j*(N+1)+i];
+  const zMin = state.zMin, range = (state.zMax - zMin) || 1;
+  const grid = state.zGrid;
   const toPx = (i) => (i/N)*W, toPy = (j) => H - (j/N)*H;
   ctx.save();
   ctx.strokeStyle = 'rgba(255,255,255,.32)';
   ctx.lineWidth = 1;
-  for (let L = 1; L < levels; L++) {
-    const level = state.zMin + (range*L)/levels;
-    ctx.beginPath();
-    for (let j = 0; j < N; j++) {
-      for (let i = 0; i < N; i++) {
-        const v00=at(i,j), v10=at(i+1,j), v01=at(i,j+1), v11=at(i+1,j+1);
-        const edges = [
-          {a:v00,b:v10,p0:[toPx(i),toPy(j)],p1:[toPx(i+1),toPy(j)]},
-          {a:v10,b:v11,p0:[toPx(i+1),toPy(j)],p1:[toPx(i+1),toPy(j+1)]},
-          {a:v11,b:v01,p0:[toPx(i+1),toPy(j+1)],p1:[toPx(i),toPy(j+1)]},
-          {a:v01,b:v00,p0:[toPx(i),toPy(j+1)],p1:[toPx(i),toPy(j)]},
-        ];
-        const pts = [];
-        edges.forEach(e => {
-          if ((e.a - level) * (e.b - level) < 0) {
-            const t = (level - e.a) / (e.b - e.a);
-            pts.push([e.p0[0] + (e.p1[0]-e.p0[0])*t, e.p0[1] + (e.p1[1]-e.p0[1])*t]);
-          }
-        });
-        if (pts.length === 2) { ctx.moveTo(pts[0][0], pts[0][1]); ctx.lineTo(pts[1][0], pts[1][1]); }
+  ctx.beginPath();
+  for (let j = 0; j < N; j++) {
+    const rowA = j*(N+1), rowB = (j+1)*(N+1);
+    const py0 = toPy(j), py1 = toPy(j+1);
+    for (let i = 0; i < N; i++) {
+      const v00 = grid[rowA+i], v10 = grid[rowA+i+1];
+      const v01 = grid[rowB+i], v11 = grid[rowB+i+1];
+      const cellMin = Math.min(v00, v10, v01, v11), cellMax = Math.max(v00, v10, v01, v11);
+      if (cellMin === cellMax) continue; // flat cell - no level can cross it
+      const px0 = toPx(i), px1 = toPx(i+1);
+      for (let L = 1; L < levels; L++) {
+        const level = zMin + (range*L)/levels;
+        if (level < cellMin || level > cellMax) continue;
+        let x0, y0, x1, y1, found = 0;
+        if ((v00-level)*(v10-level) < 0) {
+          const t = (level-v00)/(v10-v00);
+          x0 = px0+(px1-px0)*t; y0 = py0; found = 1;
+        }
+        if ((v10-level)*(v11-level) < 0) {
+          const t = (level-v10)/(v11-v10), px = px1, py = py0+(py1-py0)*t;
+          if (!found++) { x0 = px; y0 = py; } else { x1 = px; y1 = py; }
+        }
+        if ((v11-level)*(v01-level) < 0) {
+          const t = (level-v11)/(v01-v11), px = px1+(px0-px1)*t, py = py1;
+          if (!found++) { x0 = px; y0 = py; } else { x1 = px; y1 = py; }
+        }
+        if ((v01-level)*(v00-level) < 0) {
+          const t = (level-v01)/(v00-v01), px = px0, py = py1+(py0-py1)*t;
+          if (!found++) { x0 = px; y0 = py; } else { x1 = px; y1 = py; }
+        }
+        if (found === 2) { ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); }
       }
     }
-    ctx.stroke();
   }
+  ctx.stroke();
   ctx.restore();
 }
 function buildBackground(state, W, H) {
@@ -4457,24 +6293,27 @@ function buildBackground(state, W, H) {
   drawAxes(ctx, W, H);
   return bg;
 }
-function drawPathOverlay(ctx, state, W, H) {
-  const path = state.pathKey && SURFACE_PATHS[state.pathKey];
-  if (!path) return;
-  ctx.save();
-  ctx.strokeStyle = '#ff5b76';
-  ctx.lineWidth = 2.2;
-  ctx.beginPath();
-  const steps = 140;
-  let started = false;
-  for (let s = 0; s <= steps; s++) {
-    const t = -DOMAIN + (2*DOMAIN*s)/steps;
-    const {x, y} = path.point(t);
-    if (x < -DOMAIN || x > DOMAIN || y < -DOMAIN || y > DOMAIN) { started = false; continue; }
-    const [px, py] = mathToPx(x, y, W, H);
-    if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+function drawPathOverlays2D(ctx, state, W, H) {
+  const steps = 200;
+  for (const path of state.paths) {
+    ctx.save();
+    ctx.strokeStyle = path.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let started = false;
+    for (let s = 0; s <= steps; s++) {
+      const t = -DOMAIN + (2*DOMAIN*s)/steps;
+      let x, y;
+      try { ({x, y} = pathPoint(path, t)); } catch (e) { x = y = NaN; }
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < -DOMAIN || x > DOMAIN || y < -DOMAIN || y > DOMAIN) {
+        started = false; continue;
+      }
+      const [px, py] = mathToPx(x, y, W, H);
+      if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
-  ctx.stroke();
-  ctx.restore();
 }
 function drawPointMarker(ctx, state, W, H) {
   const [px, py] = mathToPx(state.point.x, state.point.y, W, H);
@@ -4498,7 +6337,15 @@ function ensureThree() {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x040b12);
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
-  camera.position.set(5.6, 4.4, 5.6);
+  // World X mirrors the 2D map's x-axis and world Z mirrors its y-axis (see
+  // buildSurfaceGeometry/updateMarker3D), so the camera must lean mainly
+  // along Z - not X - or the map's horizontal axis gets foreshortened into
+  // this view's depth axis, rotating the whole scene ~90 deg relative to the
+  // 2D panel. Off the exact diagonal on purpose too: at (X, Z) with X == Z,
+  // the camera looks straight down the y = x line, collapsing it to a
+  // near-invisible sliver here while the 2D map still shows it as a clean
+  // diagonal - the two panels would stop reading as the same space.
+  camera.position.set(3.35, 4.4, 7.18);
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -4514,12 +6361,6 @@ function ensureThree() {
   scene.add(dir2);
   scene.add(new THREE.GridHelper(2*DOMAIN, 2*DOMAIN, 0x2f7f9e, 0x16303f));
   scene.add(new THREE.AxesHelper(DOMAIN + 0.6));
-
-  const pathLine = new THREE.Line(
-    new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({color:0xff5b76, linewidth:2}));
-  pathLine.visible = false;
-  scene.add(pathLine);
 
   const marker = new THREE.Mesh(
     new THREE.SphereGeometry(0.1, 22, 16),
@@ -4542,7 +6383,8 @@ function ensureThree() {
     renderer.render(scene, camera);
   })();
 
-  three3d = {renderer, scene, camera, controls, mount, pathLine, marker, surfaceMesh:null};
+  three3d = {renderer, scene, camera, controls, mount, marker, surfaceMesh:null,
+             pathLines:new Map(), pathMarkers:new Map()};
   return three3d;
 }
 function buildSurfaceGeometry(state) {
@@ -4582,27 +6424,100 @@ function rebuildSurfaceMesh(state) {
   t.scene.add(mesh);
   t.surfaceMesh = mesh;
 }
-function rebuildPathLine3D(state) {
-  const t = ensureThree();
-  const path = state.pathKey && SURFACE_PATHS[state.pathKey];
-  if (!path) { t.pathLine.visible = false; return; }
+function samplePathPoints3D(state, path) {
   const pts = [];
-  const steps = 160;
+  const steps = 200;
   for (let s = 0; s <= steps; s++) {
-    const tt = -DOMAIN + (2*DOMAIN*s)/steps;
-    const {x, y} = path.point(tt);
-    if (x < -DOMAIN || x > DOMAIN || y < -DOMAIN || y > DOMAIN) continue;
+    const t = -DOMAIN + (2*DOMAIN*s)/steps;
+    let x, y;
+    try { ({x, y} = pathPoint(path, t)); } catch (e) { x = y = NaN; }
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < -DOMAIN || x > DOMAIN || y < -DOMAIN || y > DOMAIN) continue;
     const z = evaluateSurface(state.fn, x, y);
     pts.push(new THREE.Vector3(x, surfaceVisualHeight(z, state) + 0.015, y));
   }
-  t.pathLine.geometry.dispose();
-  t.pathLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
-  t.pathLine.visible = pts.length > 1;
+  return pts;
+}
+// LineBasicMaterial's linewidth is ignored on most platforms' WebGL - a real
+// bold line needs actual 3D thickness, so each path is a thin tube mesh
+// swept along its sampled points rather than a THREE.Line.
+const PATH_TUBE_RADIUS = 0.035;
+function buildPathTubeGeometry3D(state, path) {
+  const pts = samplePathPoints3D(state, path);
+  if (pts.length < 2) return null;
+  const curve = new THREE.CatmullRomCurve3(pts);
+  return new THREE.TubeGeometry(curve, Math.max(pts.length, 2), PATH_TUBE_RADIUS, 6, false);
+}
+// Keeps t.pathLines (one bold tube mesh per user-added path) and
+// t.pathMarkers (one small sphere per path, see updatePathMarkers3D) in sync
+// with state.paths - adding/removing meshes as paths are added/removed, and
+// re-tracing every tube whenever f(x, y) itself changes.
+function rebuildPathLines3D(state) {
+  const t = ensureThree();
+  const liveIds = new Set(state.paths.map(p => p.id));
+  for (const [id, mesh] of t.pathLines) {
+    if (!liveIds.has(id)) {
+      t.scene.remove(mesh);
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+      t.pathLines.delete(id);
+    }
+  }
+  for (const [id, marker] of t.pathMarkers) {
+    if (!liveIds.has(id)) {
+      t.scene.remove(marker);
+      marker.geometry.dispose();
+      marker.material.dispose();
+      t.pathMarkers.delete(id);
+    }
+  }
+  for (const path of state.paths) {
+    const geometry = buildPathTubeGeometry3D(state, path);
+    let mesh = t.pathLines.get(path.id);
+    if (!mesh) {
+      mesh = new THREE.Mesh(geometry || new THREE.BufferGeometry(),
+        new THREE.MeshBasicMaterial({color: path.color}));
+      t.scene.add(mesh);
+      t.pathLines.set(path.id, mesh);
+    } else if (geometry) {
+      mesh.geometry.dispose();
+      mesh.geometry = geometry;
+    }
+    mesh.visible = !!geometry;
+
+    if (!t.pathMarkers.has(path.id)) {
+      const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.07, 18, 14),
+        new THREE.MeshStandardMaterial({color: path.color, emissive: path.color, emissiveIntensity: 0.55}));
+      t.scene.add(marker);
+      t.pathMarkers.set(path.id, marker);
+    }
+  }
+  updatePathMarkers3D(state);
 }
 function updateMarker3D(state) {
   const t = ensureThree();
   const z = evaluateSurface(state.fn, state.point.x, state.point.y);
   t.marker.position.set(state.point.x, surfaceVisualHeight(z, state) + 0.03, state.point.y);
+}
+// One pointer per restricted path, placed where that path crosses the
+// current (x, y) point's free-variable coordinate - e.g. for y = g(x), the
+// point on the path directly under/over the draggable point - so a student
+// can compare "if I'd approached along this path instead" at a glance.
+function updatePathMarkers3D(state) {
+  const t = ensureThree();
+  for (const path of state.paths) {
+    const marker = t.pathMarkers.get(path.id);
+    if (!marker) continue;
+    const free = path.form === 'x-of-y' ? state.point.y : state.point.x;
+    let x, y;
+    try { ({x, y} = pathPoint(path, free)); } catch (e) { x = y = NaN; }
+    const valid = Number.isFinite(x) && Number.isFinite(y)
+      && x >= -DOMAIN && x <= DOMAIN && y >= -DOMAIN && y <= DOMAIN;
+    marker.visible = valid;
+    if (!valid) continue;
+    const z = evaluateSurface(state.fn, x, y);
+    marker.position.set(x, surfaceVisualHeight(z, state) + 0.03, y);
+  }
 }
 
 // ── Orchestration ──────────────────────────────────────────────────────────
@@ -4611,17 +6526,18 @@ function renderSurfaceFrame() {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   if (surfaceState.background) ctx.drawImage(surfaceState.background, 0, 0, W, H);
-  drawPathOverlay(ctx, surfaceState, W, H);
+  drawPathOverlays2D(ctx, surfaceState, W, H);
   drawPointMarker(ctx, surfaceState, W, H);
 
   const z = evaluateSurface(surfaceState.fn, surfaceState.point.x, surfaceState.point.y);
-  $('surfaceX').textContent = surfaceState.point.x.toFixed(2);
-  $('surfaceY').textContent = surfaceState.point.y.toFixed(2);
+  // Don't stomp the field the user is actively typing in - only the other
+  // one (and both once neither is focused, e.g. after a canvas drag).
+  const xInput = $('surfaceX'), yInput = $('surfaceY');
+  if (document.activeElement !== xInput) xInput.value = surfaceState.point.x.toFixed(2);
+  if (document.activeElement !== yInput) yInput.value = surfaceState.point.y.toFixed(2);
   $('surfaceZ').textContent = z.toFixed(3);
   updateMarker3D(surfaceState);
-}
-function updateSurfaceExplanation() {
-  $('surfaceExplainText').innerHTML = surfaceExplainHtml(surfaceState);
+  updatePathMarkers3D(surfaceState);
 }
 // Rebuilds everything derived from surfaceState.fn - called after the
 // default is (re)loaded or a lasso swaps in a freshly-compiled function.
@@ -4634,46 +6550,8 @@ function rebuildSurfaceFunction() {
   $('surfaceLegendMin').textContent = zMin.toFixed(2);
   $('surfaceLegendMax').textContent = zMax.toFixed(2);
   rebuildSurfaceMesh(surfaceState);
-  rebuildPathLine3D(surfaceState);
-  surfaceState.pathEstimates = computePathEstimates(surfaceState.fn);
-  updateSurfaceVerdict();
-  updateSurfaceExplanation();
+  rebuildPathLines3D(surfaceState);
   renderSurfaceFrame();
-}
-function onSurfacePathChange() {
-  $('surfaceAnimate').disabled = !surfaceState.pathKey;
-  $('surfaceSlopeRow').hidden = surfaceState.pathKey !== 'y=mx';
-  stopSurfaceAnimation();
-  rebuildPathLine3D(surfaceState);
-  updateSurfaceVerdict(); // re-render only: highlights the newly active row
-  updateSurfaceExplanation();
-  renderSurfaceFrame();
-}
-
-// ── Animate the point toward the origin along the selected path ──────────
-let surfaceAnimHandle = null;
-function stopSurfaceAnimation() {
-  if (surfaceAnimHandle) { cancelAnimationFrame(surfaceAnimHandle); surfaceAnimHandle = null; }
-  surfaceState.animating = false;
-  $('surfaceAnimate').classList.remove('primary');
-}
-function animateToOrigin() {
-  const path = surfaceState.pathKey && SURFACE_PATHS[surfaceState.pathKey];
-  if (!path) return;
-  stopSurfaceAnimation();
-  surfaceState.animating = true;
-  $('surfaceAnimate').classList.add('primary');
-  const start = 2.6, end = 0.015, duration = 2600;
-  const t0 = performance.now();
-  function step(now) {
-    const k = Math.min(1, (now - t0) / duration);
-    const eased = 1 - Math.pow(1 - k, 3);
-    surfaceState.point = path.point(start + (end - start) * eased);
-    renderSurfaceFrame();
-    if (k < 1 && surfaceState.animating) surfaceAnimHandle = requestAnimationFrame(step);
-    else stopSurfaceAnimation();
-  }
-  surfaceAnimHandle = requestAnimationFrame(step);
 }
 
 // ── Wiring ─────────────────────────────────────────────────────────────────
@@ -4683,6 +6561,19 @@ function canvasToMath(canvas, clientX, clientY) {
   const y = DOMAIN - ((clientY - rect.top) / rect.height) * (2*DOMAIN);
   return {x: Math.max(-DOMAIN, Math.min(DOMAIN, x)), y: Math.max(-DOMAIN, Math.min(DOMAIN, y))};
 }
+// Typing a coordinate sets the point exactly like dragging does, and just as
+// unconditionally: evaluateSurface() already renders a non-existent limit as
+// height/color 0 rather than blowing up, so there's no "does the limit exist
+// here" gate to apply before accepting a typed x or y.
+function applyManualPoint() {
+  const xInput = $('surfaceX'), yInput = $('surfaceY');
+  const x = Number(xInput.value), y = Number(yInput.value);
+  surfaceState.point = {
+    x: Number.isFinite(x) ? Math.max(-DOMAIN, Math.min(DOMAIN, x)) : surfaceState.point.x,
+    y: Number.isFinite(y) ? Math.max(-DOMAIN, Math.min(DOMAIN, y)) : surfaceState.point.y,
+  };
+  renderSurfaceFrame();
+}
 let surfaceDragging = false;
 let surfaceWired = false;
 function wireSurfaceControls() {
@@ -4691,7 +6582,6 @@ function wireSurfaceControls() {
   const canvas = $('surfaceContour');
   canvas.addEventListener('pointerdown', (ev) => {
     surfaceDragging = true;
-    stopSurfaceAnimation();
     canvas.setPointerCapture(ev.pointerId);
     surfaceState.point = canvasToMath(canvas, ev.clientX, ev.clientY);
     renderSurfaceFrame();
@@ -4704,40 +6594,20 @@ function wireSurfaceControls() {
   canvas.addEventListener('pointerup', () => { surfaceDragging = false; });
   canvas.addEventListener('pointercancel', () => { surfaceDragging = false; });
 
-  $('surfacePath').onchange = () => {
-    surfaceState.pathKey = $('surfacePath').value === 'none' ? null : $('surfacePath').value;
-    onSurfacePathChange();
-  };
-  $('surfaceSlopeSlider').addEventListener('input', () => {
-    surfaceState.slope = Number($('surfaceSlopeSlider').value);
-    $('surfaceSlopeValue').textContent = `m = ${formatSlope(surfaceState.slope)}`;
-    stopSurfaceAnimation();
-    // Only this one path's estimate moved - cheaper than recomputing all five.
-    if (surfaceState.pathEstimates) {
-      surfaceState.pathEstimates['y=mx'] = estimatePathLimit(surfaceState.fn, 'y=mx');
-      updateSurfaceVerdict();
-    }
-    if (surfaceState.pathKey === 'y=mx') {
-      rebuildPathLine3D(surfaceState);
-      updateSurfaceExplanation();
-      renderSurfaceFrame();
-    }
-  });
-  $('surfaceAnimate').onclick = () => {
-    if (surfaceState.animating) stopSurfaceAnimation(); else animateToOrigin();
-  };
-  $('surfaceLassoFn').onclick = lassoFunctionFromMaterial;
-  // The Ask-FRIDAY lasso tool and this button share one crop
-  // (materialSnapshotData/materialBridge), so the label needs to catch up
-  // even when the crop was taken from the drawer header, not this button.
-  refreshSurfaceLassoLabel();
-  new MutationObserver(() => { if (!surfaceState.lassoBusy) refreshSurfaceLassoLabel(); })
-    .observe($('materialSnapshot'), {attributes:true, attributeFilter:['class']});
+  for (const id of ['surfaceX', 'surfaceY']) {
+    const input = $(id);
+    input.addEventListener('change', applyManualPoint);
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      applyManualPoint();
+      input.blur();
+    });
+  }
 
-  // FRIDAY's reading is a starting point, not the final word - the student
-  // can correct a misread character or try a variation without re-lassoing.
   let surfaceExprEditTimer = null;
   $('surfaceFnExpr').addEventListener('input', () => {
+    updateFnPreview(); // instant, every keystroke - the full replot below is debounced, this shouldn't be
     clearTimeout(surfaceExprEditTimer);
     surfaceExprEditTimer = setTimeout(applyManualExpression, 350);
   });
@@ -4747,85 +6617,91 @@ function wireSurfaceControls() {
     clearTimeout(surfaceExprEditTimer);
     applyManualExpression();
   });
+
+  $('surfacePathAdd').addEventListener('click', addPath);
+  $('surfacePathExpr').addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter') return;
+    ev.preventDefault();
+    addPath();
+  });
+  $('surfacePathList').addEventListener('click', (ev) => {
+    const id = ev.target.dataset.removePath;
+    if (id) removePath(Number(id));
+  });
+}
+// Reparses on every keystroke (cheap: no probe-eval, no grid/mesh rebuild -
+// those stay behind applyManualExpression's 350ms debounce) purely to render
+// the AST as LaTeX. A mid-typo state ("sin(" before the closing paren) keeps
+// showing the last good render, dimmed, rather than blanking every keystroke.
+function updateFnPreview() {
+  const el = $('surfaceFnPreview');
+  const text = $('surfaceFnExpr').value.trim();
+  if (!text) { el.innerHTML = ''; el.classList.remove('stale'); return; }
+  let latex;
+  try { latex = astToLatex(parseExprTokens(tokenizeExpr(text))); }
+  catch (e) { el.classList.add('stale'); return; }
+  el.classList.remove('stale');
+  if (window.katex) {
+    try { window.katex.render(`f(x, y) = ${latex}`, el, {throwOnError:false, displayMode:true}); return; }
+    catch (e) { /* fall through to plain text below */ }
+  }
+  el.textContent = `f(x, y) = ${latex}`;
 }
 function applyManualExpression() {
   const text = $('surfaceFnExpr').value.trim();
-  if (!text) { $('surfaceLassoStatus').textContent = 'Enter a function of x and y.'; return; }
+  if (!text) { $('surfaceFnStatus').textContent = 'Enter a function of x and y.'; return; }
   let fn;
   try { fn = compileFunction(text); }
   catch (e) {
-    $('surfaceLassoStatus').textContent = `Could not use "${text}": ${e.message}`;
+    $('surfaceFnStatus').textContent = `Could not use "${text}": ${e.message}`;
     return;
   }
-  $('surfaceLassoStatus').textContent = '';
+  $('surfaceFnStatus').textContent = '';
   surfaceState.fn = fn;
   surfaceState.isDefault = false;
   surfaceState.exprText = text;
-  stopSurfaceAnimation();
   rebuildSurfaceFunction();
 }
 
-// ── AI function extraction (Lasso a segment of the material) ─────────────
-let surfaceLassoRevertTimer = null;
-function surfaceLassoDefaultLabel() {
-  return (window.materialBridge && window.materialBridge.getSnapshot())
-    ? 'Read selection' : 'Lasso function';
+// ── Restricted paths (user-added y = g(x) overlays) ───────────────────────
+function renderPathList() {
+  $('surfacePathList').innerHTML = surfaceState.paths.map(path => `
+    <span class="surfacePathChip">
+      <span class="surfacePathSwatch" style="background:${path.color}"></span>
+      <span>${path.form === 'x-of-y' ? 'x' : 'y'} = ${esc(path.exprText)}</span>
+      <button type="button" class="surfacePathChipRemove" data-remove-path="${path.id}" title="Remove this path">×</button>
+    </span>`).join('');
 }
-function setSurfaceLassoLabel(text, transient = false) {
-  clearTimeout(surfaceLassoRevertTimer);
-  $('surfaceLassoLabel').textContent = text;
-  if (transient) surfaceLassoRevertTimer = setTimeout(refreshSurfaceLassoLabel, 4000);
-}
-function refreshSurfaceLassoLabel() {
-  clearTimeout(surfaceLassoRevertTimer);
-  $('surfaceLassoLabel').textContent = surfaceLassoDefaultLabel();
-}
-async function lassoFunctionFromMaterial() {
-  const bridge = window.materialBridge;
-  const itemId = bridge && bridge.getItemId();
-  if (!itemId) { setSurfaceLassoLabel('Open a material first', true); return; }
-  const snapshot = bridge.getSnapshot();
-  if (!snapshot) { await bridge.startLasso(); return; }
-  surfaceState.lassoBusy = true;
-  $('surfaceLassoFn').disabled = true;
-  $('surfaceLassoStatus').textContent = '';
-  setSurfaceLassoLabel('Reading selection…');
-  try {
-    const res = await fetch('/api/drive/graph', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({id: itemId, snapshot}),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    bridge.clearSnapshot();
-    const funcs = (data.graph && data.graph.functions) || [];
-    const surf = funcs.find(f => Array.isArray(f.vars) && f.vars.length === 2);
-    if (!surf) {
-      $('surfaceLassoStatus').textContent = 'No f(x, y) found in that selection - try lassoing the function definition itself.';
-      setSurfaceLassoLabel('No f(x, y) found', true);
-      return;
-    }
-    let fn;
-    try { fn = compileFunction(surf.expr); }
-    catch (e) {
-      $('surfaceLassoStatus').textContent = `FRIDAY read "${surf.expr}", which this plotter could not use: ${e.message}`;
-      setSurfaceLassoLabel('Could not plot that', true);
-      return;
-    }
-    surfaceState.fn = fn;
-    surfaceState.isDefault = false;
-    surfaceState.exprText = surf.expr;
-    $('surfaceFnExpr').value = surf.expr;
-    stopSurfaceAnimation();
-    rebuildSurfaceFunction();
-    setSurfaceLassoLabel(`Plotted f(x, y) = ${surf.expr}`, true);
-  } catch (e) {
-    $('surfaceLassoStatus').textContent = e.message;
-    setSurfaceLassoLabel('Could not read that selection', true);
-  } finally {
-    surfaceState.lassoBusy = false;
-    $('surfaceLassoFn').disabled = false;
+function addPath() {
+  const input = $('surfacePathExpr');
+  const text = input.value.trim();
+  const definedVar = $('surfacePathVar').value; // 'y' -> y=g(x), 'x' -> x=g(y)
+  const freeVar = definedVar === 'x' ? 'y' : 'x';
+  if (!text) { $('surfacePathStatus').textContent = `Enter a path as ${definedVar} = g(${freeVar}).`; return; }
+  let fn;
+  try { fn = compilePathFunction(text, freeVar); }
+  catch (e) {
+    $('surfacePathStatus').textContent = `Could not use "${text}": ${e.message}`;
+    return;
   }
+  $('surfacePathStatus').textContent = '';
+  surfaceState.paths.push({
+    id: ++surfacePathIdSeq,
+    form: definedVar === 'x' ? 'x-of-y' : 'y-of-x',
+    exprText: text,
+    fn,
+    color: SURFACE_PATH_COLORS[surfaceState.paths.length % SURFACE_PATH_COLORS.length],
+  });
+  input.value = '';
+  renderPathList();
+  rebuildPathLines3D(surfaceState);
+  renderSurfaceFrame();
+}
+function removePath(id) {
+  surfaceState.paths = surfaceState.paths.filter(p => p.id !== id);
+  renderPathList();
+  rebuildPathLines3D(surfaceState);
+  renderSurfaceFrame();
 }
 
 let surfaceDashboardReady = false;
@@ -4835,13 +6711,13 @@ window.ensureSurfaceDashboard = function ensureSurfaceDashboard() {
   if (surfaceDashboardReady) return;
   surfaceDashboardReady = true;
   rebuildSurfaceFunction();
-  onSurfacePathChange();
+  updateFnPreview();
 };
 </script>
 
 <script type="module">
 // ── Lab: local Python/Java IDE (Phase 1 - shell + real execution) ─────────
-// Self-contained, like the Graph tab's module: its own state, own full-screen
+// Self-contained, like the Telemetry tab's module: its own state, own full-screen
 // overlay, one entry point (window.openLab) wired from the small #labPanel
 // launcher. AI Blueprint and Simulation tabs are stubbed here on purpose -
 // their logic is a later pass, this phase is the editor/explorer/console.
@@ -5414,7 +7290,6 @@ function wireLab() {
   };
   $('labClose').onclick = closeLab;
   $('labShade').onclick = closeLab;
-  $('labOpen').onclick = openLab;
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && document.body.classList.contains('labOpen')) closeLab();
   });
@@ -5446,6 +7321,10 @@ function closeLab() {
   $('labOverlay').setAttribute('aria-hidden', 'true');
 }
 window.openLab = openLab;
+// Bound at module load, unlike every other Lab control: wireLab() (which
+// wires the rest) only runs once openLab() has already fired once, so this
+// one button's handler can't live inside wireLab() without never firing.
+$('labOpen').onclick = openLab;
 
 // Right-panel sub-tabs: Console, AI Blueprint, Simulation.
 function switchLabPane(name) {

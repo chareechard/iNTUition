@@ -36,6 +36,10 @@ SCHEDULE_PATTERN = re.compile(
     r"\b(?:start|first|begin).{0,80}\b(?:tutorial|lab|lecture|class).{0,100}"
     r"(?:\bweek\s*\d+|\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|"
     r"ninth|tenth|eleventh|twelfth|thirteenth)\s+week\b)", re.IGNORECASE | re.DOTALL)
+IMPORTANT_DATE_PATTERN = re.compile(
+    r"\b(mid[ -]?term|final(?:\s+exam)?|exam(?:ination)?|quiz|test|"
+    r"presentation|demo|oral|viva|defen[cs]e|assignment|homework|coursework|"
+    r"project|report|essay|graded)\b", re.IGNORECASE)
 
 SCHEDULE_CHANGE_SCHEMA = json.dumps({
     "type": "array", "items": {"type": "object", "additionalProperties": False,
@@ -341,3 +345,66 @@ class Feed:
         if failures and len(failures) == attempted and not out:
             raise ValueError("Every schedule candidate failed: {}".format(failures[0]))
         return out
+
+    def detect_important_dates(self, preferred=None) -> List[Dict]:
+        """Extract explicitly dated assessments for the Temporal Protocol."""
+        candidates = [item for item in self.items if IMPORTANT_DATE_PATTERN.search(
+            "{}\n{}".format(item.get("title", ""), item.get("body", "")))]
+        if not candidates:
+            return []
+        system = (
+            "Extract only explicitly announced student assessment dates: midterms, final "
+            "exams, quizzes/tests, presentations, demos, oral examinations, and graded "
+            "assignment/homework/coursework/project/report/essay due dates. Return a "
+            "JSON array only. Each object must contain source_id, source_title, course, "
+            "date (YYYY-MM-DD), kind "
+            "(midterm|final|quiz|presentation|oral|assignment), start, end, "
+            "venue, and details. Resolve relative dates from TODAY. A submission deadline "
+            "is not a presentation date unless the announcement explicitly says the "
+            "presentation occurs then; classify it as assignment when the submitted work "
+            "is graded. Exclude ungraded practice, optional work, and content-release "
+            "dates. Omit tentative, ambiguous, or undated items and "
+            "never invent a time or venue; use an empty string when absent. Return [].")
+        out, failures = [], []
+        allowed = {"midterm", "final", "quiz", "presentation", "oral", "assignment"}
+        for item in candidates[:20]:
+            prompt = "TODAY: {}\nID: {}\nCOURSE: {}\nTITLE: {}\nBODY:\n{}".format(
+                datetime.now().date().isoformat(), item["id"], item["course"],
+                item["title"], item["body"][:4000])
+            try:
+                result = ai_provider.complete(prompt, system, preferred=preferred,
+                    max_tokens=700, download_root=self.root, timeout=12)
+                text = str(result.get("text") or "").strip()
+                if text.startswith("```"):
+                    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text,
+                                  flags=re.IGNORECASE)
+                start = text.find("[")
+                if start < 0:
+                    raise ValueError("result has no JSON array")
+                parsed, _end = json.JSONDecoder().raw_decode(text[start:])
+                if not isinstance(parsed, list):
+                    raise ValueError("result is not a JSON array")
+                for row in parsed:
+                    if not isinstance(row, dict) or row.get("source_id") != item["id"]:
+                        continue
+                    try:
+                        datetime.strptime(str(row.get("date") or ""), "%Y-%m-%d")
+                    except ValueError:
+                        continue
+                    kind = str(row.get("kind") or "").lower()
+                    if kind not in allowed:
+                        continue
+                    clean_row = {key: str(row.get(key) or "").strip() for key in
+                                 ("source_id", "course", "date", "kind", "start",
+                                  "end", "venue", "details")}
+                    clean_row["source_title"] = item["title"]
+                    out.append(clean_row)
+            except Exception as exc:
+                failures.append(str(exc))
+        if failures and len(failures) == min(len(candidates), 20) and not out:
+            raise ValueError("Every important-date candidate failed: {}".format(failures[0]))
+        unique = {}
+        for row in out:
+            unique[(row["course"].upper(), row["date"], row["kind"], row["start"],
+                    row["details"])] = row
+        return sorted(unique.values(), key=lambda row: (row["date"], row["start"]))

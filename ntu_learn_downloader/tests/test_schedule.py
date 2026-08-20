@@ -284,6 +284,63 @@ class TestWeekAwareStore(unittest.TestCase):
             self.assertEqual(again.exams[0]["course"], "SC2001")
             self.assertEqual(again.courses[0]["index"], "10154")
 
+    def test_announcement_important_dates_survive_a_save(self):
+        with TemporaryDirectory() as root:
+            s = schedule.Schedule(root)
+            self.assertEqual(s.set_announcement_important_dates([
+                {"source_id": "a", "source_title": "Presentation",
+                 "course": "sc2002", "date": "2026-10-08",
+                 "kind": "presentation", "start": "10:00"},
+                {"source_id": "b", "source_title": "Assignment",
+                 "course": "sc2002", "date": "2026-10-09",
+                 "kind": "assignment", "start": "23:59"},
+                {"course": "SC2002", "date": "unknown", "kind": "final"},
+            ]), 2)
+            s.save()
+            again = schedule.Schedule(root)
+            self.assertEqual(again.important_dates[0]["course"], "SC2002")
+            self.assertEqual(again.important_dates[1]["kind"], "assignment")
+
+    def test_future_important_date_survives_announcement_rotation(self):
+        with TemporaryDirectory() as root:
+            s = schedule.Schedule(root)
+            s.important_dates = [{"source_id": "old", "source_title": "Final",
+                                  "course": "SC2002", "date": "2099-11-20",
+                                  "kind": "final", "start": "", "end": "",
+                                  "venue": "", "details": ""}]
+            self.assertEqual(s.set_announcement_important_dates([]), 0)
+            self.assertEqual(len(s.important_dates), 1)
+
+    def test_distinct_same_time_assessments_are_not_merged(self):
+        with TemporaryDirectory() as root:
+            s = schedule.Schedule(root)
+            events = [
+                {"source_id": "a", "course": "SC2005", "date": "2026-10-08",
+                 "kind": "quiz", "start": "12:30", "details": "Lecture Quiz 4"},
+                {"source_id": "a", "course": "SC2005", "date": "2026-10-08",
+                 "kind": "quiz", "start": "12:30", "details": "Lab Quiz 1"},
+            ]
+            self.assertEqual(s.set_announcement_important_dates(events), 2)
+            self.assertEqual(len(s.important_dates), 2)
+
+    def test_announcement_amends_matching_document_assessment(self):
+        with TemporaryDirectory() as root:
+            s = schedule.Schedule(root)
+            s.set_announcement_important_dates([{
+                "source_id": "drive:outline", "source_title": "Course outline",
+                "course": "SC2005", "date": "2026-09-03", "kind": "quiz",
+                "start": "12:30", "details": "Lecture Quiz 2",
+            }])
+            s.set_announcement_important_dates([{
+                "source_id": "announcement-2", "source_title": "Quiz 2 moved",
+                "course": "SC2005", "date": "2026-09-04", "kind": "quiz",
+                "start": "14:30", "details": "Lecture Quiz 2 moved to Friday",
+            }])
+            self.assertEqual(len(s.important_dates), 1)
+            self.assertEqual(s.important_dates[0]["date"], "2026-09-04")
+            self.assertTrue(s.important_dates[0]["amended"])
+            self.assertEqual(s.important_dates[0]["origin"], "announcement")
+
 
 if __name__ == "__main__":
     unittest.main()

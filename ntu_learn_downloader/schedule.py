@@ -356,6 +356,7 @@ class Schedule:
         self.semester: str = ""
         self.imported_at: Optional[str] = None
         self.overrides: List[Dict] = []
+        self.important_dates: List[Dict] = []
         self.load()
 
     def load(self):
@@ -371,6 +372,7 @@ class Schedule:
             self.semester = data.get("semester", "")
             self.imported_at = data.get("imported_at")
             self.overrides = data.get("overrides", [])
+            self.important_dates = data.get("important_dates", [])
         except (ValueError, OSError):
             self.sessions = []
 
@@ -386,6 +388,7 @@ class Schedule:
             "courses": self.courses,
             "semester": self.semester,
             "overrides": self.overrides,
+            "important_dates": self.important_dates,
         }
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -435,6 +438,73 @@ class Schedule:
                     "end", "venue", "weeks", "source_id", "source_title", "reason")}
             clean.append(row)
         self.overrides = clean
+        return len(clean)
+
+    def set_announcement_important_dates(self, events: List[Dict]):
+        """Merge assessment milestones, letting announcements amend document dates."""
+        allowed = {"midterm", "final", "quiz", "presentation", "oral", "assignment"}
+        clean = []
+        for event in events:
+            try:
+                datetime.strptime(str(event.get("date") or ""), "%Y-%m-%d")
+            except ValueError:
+                continue
+            kind = str(event.get("kind") or "").lower()
+            course = str(event.get("course") or "").strip().upper()
+            if kind not in allowed or not course:
+                continue
+            row = {key: str(event.get(key) or "").strip() for key in
+                   ("source_id", "source_title", "date", "course", "kind",
+                    "start", "end", "venue", "details")}
+            row["course"], row["kind"] = course, kind
+            text = "{} {}".format(row["details"], row["source_title"]).lower()
+            labels = (
+                r"lecture\s+quiz\s*\d+", r"lab\s+quiz\s*\d+",
+                r"concept\s+quiz", r"algorithm\s+quiz", r"test\s*\d+",
+                r"quiz\s*\d+", r"assignment\s*\d+", r"midterm(?:\s+exam)?",
+                r"final(?:\s+exam)?", r"presentation\s*\d*")
+            label = next((match.group(0) for pattern in labels
+                          for match in [re.search(pattern, text)] if match), row["kind"])
+            row["assessment_key"] = "{}:{}".format(
+                course, re.sub(r"\s+", "", label))
+            row["origin"] = ("drive" if row["source_id"].startswith("drive:")
+                             else "announcement")
+            clean.append(row)
+        # Announcements rotate out of the seven-day feed long before an assessment
+        # may occur. Keep future milestones, while a reprocessed source replaces its
+        # previous extraction and past dates naturally expire.
+        incoming_sources = {row["source_id"] for row in clean if row["source_id"]}
+        announcement_keys = {row["assessment_key"] for row in clean
+                             if row["origin"] == "announcement"}
+        existing_by_key = {row.get("assessment_key"): row
+                           for row in self.important_dates
+                           if row.get("assessment_key")}
+        retained = []
+        for row in self.important_dates:
+            if row.get("date", "") < date.today().isoformat():
+                continue
+            if row.get("source_id") in incoming_sources:
+                continue
+            if row.get("assessment_key") in announcement_keys:
+                continue
+            retained.append(row)
+        retained_keys = {row.get("assessment_key") for row in retained}
+        accepted = []
+        for row in clean:
+            previous = existing_by_key.get(row["assessment_key"])
+            if row["origin"] == "drive" and row["assessment_key"] in retained_keys:
+                continue
+            if row["origin"] == "announcement" and previous:
+                row["amended"] = True
+                row["amended_from"] = previous.get("source_title", "")
+            accepted.append(row)
+        merged = retained + accepted
+        unique = {}
+        for row in merged:
+            unique[(row["course"], row["date"], row["kind"], row["start"],
+                    row["details"])] = row
+        self.important_dates = sorted(
+            unique.values(), key=lambda row: (row["date"], row["start"]))
         return len(clean)
 
     def dynamic_week(self, monday, teaching_week: Optional[int] = None):

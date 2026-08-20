@@ -141,3 +141,36 @@ def test_ordinal_week_starts_follow_the_students_group_pattern(tmp_path):
     by_type = {change["type"]: change["weeks"] for change in changes}
     assert by_type == {"LAB": "Wk3,5,7,9,11,13",
                        "TUT": "Wk4,5,6,7,8,9,10,11,12,13"}
+
+
+def test_assessment_dates_are_extracted_for_temporal_protocol(tmp_path):
+    feed = Feed(str(tmp_path))
+    feed.items = [clean({"id": "exam", "title": "Midterm details",
+                         "body": "<p>Midterm: 2 September 2026, 14:30, LT2.</p>"},
+                        COURSE)]
+    answer = ('[{"source_id":"exam","source_title":"x","course":"SC2002",'
+              '"date":"2026-09-02","kind":"midterm","start":"14:30",'
+              '"end":"","venue":"LT2","details":"Midterm"}]')
+    with patch("ntu_learn_downloader.announcements.ai_provider.complete",
+               return_value={"text": answer}):
+        events = feed.detect_important_dates(preferred="cli")
+    assert events[0]["date"] == "2026-09-02"
+    assert events[0]["kind"] == "midterm"
+    assert events[0]["source_title"] == "Midterm details"
+
+
+def test_graded_assignment_due_date_is_extracted(tmp_path):
+    feed = Feed(str(tmp_path))
+    feed.items = [clean({
+        "id": "assignment", "title": "Assignment 2 deadline",
+        "body": "<p>Graded Assignment 2 (15%) is due 18 September 2026 at 23:59.</p>"
+    }, COURSE)]
+    answer = ('[{"source_id":"assignment","source_title":"x",'
+              '"course":"SC2002","date":"2026-09-18","kind":"assignment",'
+              '"start":"23:59","end":"","venue":"","details":"Assignment 2 (15%) due"}]')
+    with patch("ntu_learn_downloader.announcements.ai_provider.complete",
+               return_value={"text": answer}):
+        events = feed.detect_important_dates(preferred="cli")
+    assert events[0]["kind"] == "assignment"
+    assert events[0]["date"] == "2026-09-18"
+    assert events[0]["start"] == "23:59"
