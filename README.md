@@ -101,21 +101,21 @@ That data is intentionally separate from the package and is not suitable for sha
 
 The main package is `intuition`:
 
-- `dashboard.py` — local HTTP dashboard and orchestration layer.
-- `api.py`, `rest.py`, `auth.py`, `sync.py`, `contentcache.py`, and `ledger.py` —
+- `dashboard.py` ? local HTTP dashboard and orchestration layer.
+- `api.py`, `rest.py`, `auth.py`, `sync.py`, `contentcache.py`, and `ledger.py` ?
   Blackboard access, authentication, incremental sync, caching, and download state.
 - `schedule.py`, `academic_calendar.py`, `semester.py`, `announcements.py`, and
-  `inbound.py` — academic dates, timetable/announcement parsing, and optional inbox triage.
-- `drive.py`, `drive_push.py`, and `materials.py` — local/Drive material discovery and relay.
-- `notes.py`, `todo.py`, `triage.py`, `triage_store.py`, and `triage_run.py` — local study
+  `inbound.py` ? academic dates, timetable/announcement parsing, and optional inbox triage.
+- `drive.py`, `drive_push.py`, and `materials.py` ? local/Drive material discovery and relay.
+- `notes.py`, `todo.py`, `triage.py`, `triage_store.py`, and `triage_run.py` ? local study
   notes, task queries, and triage workflows.
 - research.py, ureca.py, profile.py, and saved_topics.py - profile-driven research drafting and locally saved topics.
-- `lab.py`, `lab_analysis.py`, `chat_memory.py`, `summary.py`, and `compendium.py` —
+- `lab.py`, `lab_analysis.py`, `chat_memory.py`, `summary.py`, and `compendium.py` ?
   study-lab, AI-assisted study, memory, and document features.
-- `desktop.py`, `build_info.py`, `utils.py`, and `__main__.py` — desktop entry point,
+- `desktop.py`, `build_info.py`, `utils.py`, and `__main__.py` ? desktop entry point,
   build metadata, shared helpers, and package execution support.
-- `static/` — dashboard HTML and vendored browser assets.
-- `tests/` — unit and integration tests; they use temporary directories and mocks.
+- `static/` ? dashboard HTML and vendored browser assets.
+- `tests/` ? unit and integration tests; they use temporary directories and mocks.
 
 The repository also retains `main.py` as a small compatibility CLI wrapper. New feature
 work should generally target the `intuition` package and its dashboard APIs.
@@ -142,3 +142,5 @@ credentials, course exports, or screenshots containing student information.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Repository maintainer: [@chareechard](https://github.com/chareechard)
