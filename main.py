@@ -4,15 +4,15 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
-from ntu_learn_downloader import (
+from intuition import (
     get_courses,
     get_download_dir,
     get_file_download_link,
     get_recorded_lecture_download_link,
 )
-from ntu_learn_downloader import auth
-from ntu_learn_downloader.contentcache import ContentCache
-from ntu_learn_downloader.utils import (
+from intuition import auth
+from intuition.contentcache import ContentCache
+from intuition.utils import (
     download,
     get_filename_from_url,
     get_video_download_size,

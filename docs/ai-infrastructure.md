@@ -22,11 +22,9 @@ routes until one produces a usable answer.
 Consistency is preserved where it actually matters - within the scholar tier - rather than
 smeared across surfaces that never needed it.
 
-## Measured, not assumed
+## Historical benchmark notes (non-authoritative)
 
-All figures from the live OmniRoute gateway on this machine, 14 Aug 2026. The catalogue
-holds 567 models across 19 providers. Prompt was a grounded, material-shaped question with
-the real FRIDAY system prompt.
+The following comparison is a historical design exercise, not a current service guarantee. Route availability, model catalogues, latency, and output quality change over time; rerun the same measurement procedure in the target environment before relying on these figures.
 
 ### Single-shot comparison
 
@@ -102,7 +100,7 @@ check rather than hard-coded - a separate small bug this investigation turned up
 |---|---|---|---|
 | `CHAT` | Ask FRIDAY | fast, cheap, disposable | `auto/coding:free` → `auto/fast` → `claude/claude-sonnet-5` |
 | `SCHOLAR` | Compendium, Research | rigorous, reproducible, cited | `claude/claude-opus-5` **only** |
-| `BULK` | triage, announcements, to-do enrichment | high volume, structured, low stakes | `auto/coding:free` → `auto/fast` |
+| `BULK` | triage, announcement TL;DR + de-duplication, to-do enrichment | high volume, structured, low stakes | `auto/coding:free` → `auto/fast` |
 | `VISION` | lasso snapshots | multimodal | `auto/best-vision` |
 
 `auto/coding:free` leads the chat ladder rather than the marginally faster `auto/fast`

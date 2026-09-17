@@ -4,7 +4,7 @@
     python tools/check_build_fresh.py --quiet    # exit code only
 
 The desktop build is a snapshot: ``packaging/intuition.spec`` copies
-``ntu_learn_downloader/static`` in as PyInstaller data, and the Python modules are
+``intuition/static`` in as PyInstaller data, and the Python modules are
 frozen into the archive. Nothing about a stale .exe looks stale - it renders the
 page it was built with, so an edit that "did not apply" is indistinguishable from
 a bug in the edit. This tells the two apart before you go hunting.
@@ -19,7 +19,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PACKAGE = os.path.join(HERE, "ntu_learn_downloader")
+PACKAGE = os.path.join(HERE, "intuition")
 SOURCE_STATIC = os.path.join(PACKAGE, "static")
 DIST = os.path.join(HERE, "dist", "iNTUition")
 EXE = os.path.join(DIST, "iNTUition.exe")
@@ -27,8 +27,8 @@ EXE = os.path.join(DIST, "iNTUition.exe")
 # PyInstaller moved bundled data under _internal in 6.x; older layouts put it
 # beside the executable. Accept either rather than pinning a version here.
 BUNDLE_CANDIDATES = (
-    os.path.join(DIST, "_internal", "ntu_learn_downloader", "static"),
-    os.path.join(DIST, "ntu_learn_downloader", "static"),
+    os.path.join(DIST, "_internal", "intuition", "static"),
+    os.path.join(DIST, "intuition", "static"),
 )
 
 

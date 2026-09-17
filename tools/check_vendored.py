@@ -15,14 +15,14 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SOURCE = os.path.join(HERE, "ntu_learn_downloader", "claude_bridge.py")
+SOURCE = os.path.join(HERE, "intuition", "claude_bridge.py")
 HEADER = ("# VENDORED COPY - do not edit here.\n"
-          "# Source: iNTUition/ntu_learn_downloader/claude_bridge.py\n"
+          "# Source: iNTUition/intuition/claude_bridge.py\n"
           "# Edit the source, then re-run its tools/check_vendored.py to sync.\n")
 
 
 def targets():
-    from ntu_learn_downloader import claude_bridge
+    from intuition import claude_bridge
     parent = os.path.dirname(HERE)
     return [os.path.join(parent, rel.replace("/", os.sep))
             for rel in claude_bridge.VENDOR_TARGETS]
@@ -55,7 +55,7 @@ if __name__ == "__main__":
         print("absent (skipped): {}".format(p))
     for p in drifted:
         print("DRIFTED: {}".format(p))
-    from ntu_learn_downloader import claude_bridge
+    from intuition import claude_bridge
     if not claude_bridge.VENDOR_TARGETS:
         print("no vendored copies declared")
     else:

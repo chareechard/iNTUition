@@ -12,8 +12,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ntu_learn_downloader import auth, rest, semester
-from ntu_learn_downloader.api import is_course_excluded
+from intuition import auth, rest, semester
+from intuition.api import is_course_excluded
 
 
 def main():

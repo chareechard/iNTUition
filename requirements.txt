@@ -4,6 +4,7 @@ lxml>=4.5.1
 
 # test only
 pytest>=7.0
+mypy>=1.11
 
 # Google Drive pipeline (optional; only needed for drive_push / the dashboard's Push button)
 google-api-python-client>=2.0
@@ -12,6 +13,11 @@ google-auth-oauthlib>=1.0
 # PDF text (optional; needed by schedule_import for a STARS PDF, and by the Drive
 # pipeline to extract text from PDFs before they reach the model)
 pypdf>=4.0
+
+# PDF page rendering (optional; lets Compendium show the model the actual rendered
+# page image alongside extracted text - a self-contained wheel, no external poppler
+# binary needed. Falls back to text-only when absent.)
+pymupdf>=1.24
 
 # Transcription (optional; only needed for transcribe_run / the dashboard's Whisper button)
 faster-whisper>=1.0

@@ -3,7 +3,32 @@ import os
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 repo = os.path.abspath(os.path.join(SPECPATH, ".."))
-hidden = collect_submodules("googleapiclient") + collect_submodules("google_auth_oauthlib")
+
+
+def optional_submodules(package):
+    """Collect hidden imports only when an optional feature is installed.
+
+    The dashboard's core runtime deliberately does not require Drive or Playwright.
+    A desktop-only development environment must therefore be able to build the
+    executable without either package, while a full environment should still carry
+    their dynamically imported modules into the bundle.
+    """
+    try:
+        return collect_submodules(package)
+    except (ImportError, ModuleNotFoundError):
+        return []
+
+
+def optional_package(package):
+    """Return optional package data, binaries and hidden imports if available."""
+    try:
+        return collect_all(package)
+    except (ImportError, ModuleNotFoundError):
+        return [], [], []
+
+
+hidden = (optional_submodules("googleapiclient") +
+          optional_submodules("google_auth_oauthlib"))
 
 # Sync's inbound leg reads OWA through Playwright (do_inbound_sync -> triage_run._scan
 # -> owa.Mailbox), so excluding it left the packaged app raising SessionExpired on every
@@ -11,14 +36,15 @@ hidden = collect_submodules("googleapiclient") + collect_submodules("google_auth
 # the Node driver (driver/node.exe and driver/package) along with the Python package.
 # The browsers themselves are deliberately not bundled - Playwright resolves those from
 # the user's ms-playwright directory at runtime, as it does for the developer install.
-pw_datas, pw_binaries, pw_hidden = collect_all("playwright")
+pw_datas, pw_binaries, pw_hidden = optional_package("playwright")
 
 a = Analysis(
-    [os.path.join(repo, "ntu_learn_downloader", "desktop.py")],
+    [os.path.join(repo, "intuition", "desktop.py")],
     pathex=[repo],
     binaries=pw_binaries,
     datas=[
-        (os.path.join(repo, "ntu_learn_downloader", "static"), "ntu_learn_downloader/static"),
+        (os.path.join(repo, "intuition", "static"), "intuition/static"),
+        (os.path.join(repo, "intuition", "data"), "intuition/data"),
     ] + pw_datas,
     hiddenimports=hidden + pw_hidden + ["webview", "webview.platforms.edgechromium"],
     excludes=["pytest", "faster_whisper"],

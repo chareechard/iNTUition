@@ -1,6 +1,9 @@
 # Compendium - compiled LaTeX summary notes from accessed material
 
-Status: design. Nothing here is built yet.
+Status: implemented. The dashboard's Compendium flow is orchestrated in the dashboard
+and summary modules; drive extraction is page-aware and latex.py owns linting, sandboxed
+compilation, and repair diagnostics. This document records the design contract and
+remaining investigation notes rather than a separate runtime module.
 
 ## What it is
 
@@ -29,19 +32,15 @@ Most of the parts already exist and are load-bearing for something else:
 * KaTeX is already vendored under `static/vendor/katex`, so the body can be previewed in
   the browser before anything is compiled.
 
-What is genuinely new is small: a LaTeX preamble we own, a compile-and-repair loop, page
-provenance, and one honest prompt.
+What is genuinely new is small: a LaTeX preamble we own, a compile-and-repair loop,
+page provenance, and one honest prompt. The implementation lives in the modules named
+above; this file is not a separate runtime module.
 
 ## Research findings
 
-Verified on this machine on 2026-08-14 unless marked otherwise.
+The notes below describe an implementation investigation; local tool availability and timings vary by machine.
 
-**A real LaTeX toolchain is present.** MiKTeX at
-`C:\Users\ADMIN\AppData\Local\Programs\MiKTeX\miktex\bin\x64\pdflatex.exe`, with
-`xelatex`, `lualatex` and `latexmk` beside it. `tectonic` and `pandoc` are absent.
-So the feature can produce an actual PDF locally rather than only emitting `.tex` and
-hoping. It must still degrade to `.tex` only when the binary is missing, since a packaged
-build on another machine will not have MiKTeX.
+**A real LaTeX toolchain may be available.** The implementation should discover `pdflatex`, `xelatex`, `lualatex` or `latexmk` at runtime; `tectonic` and `pandoc` are optional. The feature should produce a PDF when a supported TeX distribution is available and degrade to `.tex` only when it is not.
 
 **A representative document compiles headlessly in 3.5 seconds.** `article` with
 `amsmath, amssymb, amsthm, geometry, hyperref, enumitem, booktabs`, inline and display
@@ -49,7 +48,7 @@ maths, an `align` environment and a `booktabs` table: exit 0, 108 KB PDF, no pro
 That is the whole preamble the feature needs and it is cheap.
 
 **Missing packages auto-install without prompting.** `tikz-cd` and `siunitx`, neither
-previously installed, were fetched by MiKTeX mid-compile and the run still exited 0. Good
+previously installed, were fetched by the local TeX distribution mid-compile and the run still exited 0. Good
 for robustness, but it means the *first* compile after a preamble change can be slow, and
 it means the timeout has to be generous rather than tight.
 
@@ -219,8 +218,10 @@ compose the document from the claims. One pass over 12 files does not fit, and m
 importantly a single pass over a whole course produces a summary of nothing in particular.
 
 Token budget for ring 1 and 2: material caps at 40 000 characters, roughly 10 000 tokens.
-Output needs `max_tokens` around 8 000 - a six-page summary with maths is long, and the
-current chat value of 900 (dashboard.py:1777) is nowhere near it.
+Output needs a large `max_tokens` - a six-page summary with maths is long, and the
+current chat value of 900 (dashboard.py:1777) is nowhere near it. In practice this has
+grown from 8 000 to 64 000 (see `summary.MAX_TOKENS`) as larger whole-topic runs kept
+hitting the ceiling before the closing marker.
 
 ## Surfaces
 
@@ -236,8 +237,8 @@ It follows the pattern `do_unified_sync` already uses - worker thread plus polle
 
 ```
 POST /api/study/summary          {id, prompt, scope, include_notes} -> {job}
-GET  /api/study/summary/<job>    -> {state, stage, log, error, tex, ...}
-GET  /api/study/summary/<job>/pdf -> application/pdf
+GET  /api/study/summary?job=<job> -> {state, stage, log, error, tex, ...}
+GET  /api/study/summary/pdf?job=<job> -> application/pdf
 ```
 
 `stage` should be honest and specific, because two minutes of "Working..." is worse than

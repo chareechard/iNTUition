@@ -1,5 +1,8 @@
 # Custom
 .vscode/
+# Build-time asset generators pull three.js in here; the baked .glb is committed,
+# the dep tree is not (npm i in tools/ to regenerate).
+tools/node_modules/
 venv
 temp
 tmp/
@@ -63,8 +66,9 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 .test-tmp/
+.pytest-tmp-runtime/
 .desktop-fix-test-*/
-# pytest --basetemp=test droppings. The real suite lives in ntu_learn_downloader/tests/,
+# pytest --basetemp=test droppings. The real suite lives in intuition/tests/,
 # so this root-anchored entry cannot swallow it.
 /test/
 
@@ -107,7 +111,7 @@ dmypy.json
 # Staging folder for downloaded course material, plus the Drive ledger and content
 # cache that live inside it. Machine-specific and contains Drive file ids.
 NTU/
-.ntu_learn_downloader/
+.intuition/
 drive_ledger.json
 content_cache.json
 
@@ -117,14 +121,27 @@ content_cache.json
 /Course(s) Registered*.pdf
 /*.webp
 /*.jfif
+/*.jpg
+/*.jpeg
+/*.png
 
-# A separate tool with its own upstream (chareechard/claude-context-bar), vendored here
-# only for local use. Nothing in this package imports it; it keeps its own history.
+# A separate local-only context-bar utility may be present during development.
+# Nothing in this package imports it; it is excluded from public release copies.
 /claude-context-bar/
 
 # Local dashboard launch traces
 .dashboard-start.*.log
+*.log
+
+# curl cookie jars (live session tokens) dropped in the repo root during manual testing
+/cj.txt
+/*.cookies.txt
 
 # Scratch workspace for ad-hoc debugging scripts/screenshots - pw-profile alone is a
 # full Playwright/Chrome profile (cookies, autofill, web data), never something to commit.
 .claude-scratch/
+
+# Local clean-slate GitHub release staging copy
+/github-clean-slate/
+
+/github-clean-slate-final/

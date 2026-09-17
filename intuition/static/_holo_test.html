@@ -1,0 +1,396 @@
+<!doctype html><html><head><meta charset="utf-8"><title>holo test</title>
+<style>
+  body{background:#04101a;margin:0;font-family:system-ui;padding:24px;display:flex;gap:24px;flex-wrap:wrap;}
+  .focusHoloStage{position:relative;width:440px;height:250px;overflow:hidden;
+    border:1px solid #1f4a5e;border-radius:10px;cursor:grab;touch-action:none;
+    background:radial-gradient(ellipse at 50% 6%,rgba(56,211,255,.10),transparent 55%),
+      radial-gradient(ellipse at 50% 124%,rgba(56,211,255,.22),transparent 60%),
+      linear-gradient(180deg,rgba(3,10,16,.35),rgba(2,7,12,.72));}
+  .focusHoloStage canvas{display:block;width:100%!important;height:100%!important;}
+  .focusHoloStage::after{content:"";position:absolute;inset:0;pointer-events:none;mix-blend-mode:screen;
+    background:repeating-linear-gradient(rgba(56,211,255,.05) 0 1px,transparent 1px 3px);}
+</style>
+<!-- Serve via the dashboard (http://localhost:PORT/static/_holo_test.html) so the
+     /static/vendor paths resolve. Mirrors the Focus-panel hologram module. -->
+<script type="importmap">{"imports":{"three":"/static/vendor/three/three.module.min.js"}}</script>
+</head><body>
+<div><figure class="focusHolo" id="focusHolo"><div class="focusHoloStage" id="focusHoloStage"></div></figure>
+<div style="margin-top:12px">
+  <button onclick="focusHologram.setPhase('focus')">focus</button>
+  <button onclick="focusHologram.setPhase('break')">break</button>
+  <button onclick="focusHologram.setPhase('ending')">ending</button>
+  <button onclick="focusHologram.setPhase('idle')">idle</button>
+  <button onclick="focusHologram.setColor('#ff2d2d')">ferrari</button>
+  <button onclick="focusHologram.setColor('#38d3ff')">cyan</button>
+</div></div>
+<script type="module">
+window.addEventListener('focus-hologram-ready',()=>{ focusHologram.start(); focusHologram.setPhase('focus'); });
+</script>
+<script type="module">
+// ── Focus panel hologram - a volumetric projection of a stylised 2026-spec
+// open-wheeler ──────────────────────────────────────────────────────────────
+// Standalone copy of the dashboard's Focus-panel hologram module for quick
+// visual iteration. Keep it in sync with dashboard.html. The chassis is a real
+// glTF model (/static/vendor/models/focus-chassis.glb, baked by
+// tools/build_focus_chassis.mjs) - CLEAN-ROOM, hand-authored stylised geometry,
+// no team/marque/scan/real-car data. It floats and slowly turns over a floor
+// projector; a fresnel + scanline shader is draped over every model mesh.
+import * as THREE from 'three';
+import { GLTFLoader } from '/static/vendor/three/jsm/loaders/GLTFLoader.js';
+
+const MODEL_URL = '/static/vendor/models/focus-chassis.glb';
+const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)');
+const CYAN  = new THREE.Color(0x38d3ff);
+const GREEN = new THREE.Color(0x46e0a0);
+const AMBER = new THREE.Color(0xffb347);
+const WHITE = new THREE.Color(0xffffff);
+const TOP = 5;      // uReveal height that clips nothing
+const LIFT = 0.3;   // how far the model floats above the projector disc
+
+/* ── stage-dressing geometry (the car itself is loaded, not built here) ──── */
+
+function projectorGeometry() {
+  const v = [];
+  for (let k = 1; k <= 3; k++) {
+    const rr = k * 0.9;
+    for (let i = 0; i < 64; i++) {
+      const a = i / 64 * Math.PI * 2, b = (i + 1) / 64 * Math.PI * 2;
+      v.push(Math.cos(a) * rr, 0, Math.sin(a) * rr, Math.cos(b) * rr, 0, Math.sin(b) * rr);
+    }
+  }
+  for (let i = 0; i < 16; i++) {
+    const a = i / 16 * Math.PI * 2;
+    v.push(0, 0, 0, Math.cos(a) * 2.75, 0, Math.sin(a) * 2.75);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+  return g;
+}
+
+function unitRingGeometry(n) {
+  const v = [];
+  for (let i = 0; i < n; i++) {
+    const a = i / n * Math.PI * 2, b = (i + 1) / n * Math.PI * 2;
+    v.push(Math.cos(a), 0, Math.sin(a), Math.cos(b), 0, Math.sin(b));
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+  return g;
+}
+
+/* ── materials ──────────────────────────────────────────────────────────── */
+const HOLO_VERT = `
+  varying vec3 vN;
+  varying vec3 vView;
+  varying vec3 vWorld;
+  void main() {
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vN = normalize(mat3(modelMatrix) * normal);
+    vView = normalize(cameraPosition - wp.xyz);
+    vWorld = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }`;
+const HOLO_FRAG = `
+  precision mediump float;
+  uniform vec3  uColor;
+  uniform vec3  uLight;
+  uniform float uTime;
+  uniform float uReveal;
+  uniform float uFlicker;
+  uniform float uOpacity;
+  varying vec3 vN;
+  varying vec3 vView;
+  varying vec3 vWorld;
+  void main() {
+    if (vWorld.y > uReveal) discard;
+    vec3  n    = normalize(vN);
+    float lam  = clamp(dot(n, normalize(uLight)) * 0.5 + 0.5, 0.0, 1.0);
+    float form = 0.26 + 0.74 * lam * lam;
+    float fres = pow(1.0 - abs(dot(n, normalize(vView))), 2.0);
+    float scan = 0.5 + 0.5 * sin(vWorld.y * 66.0 - uTime * 3.5);
+    float lat  = 0.5 + 0.5 * sin(vWorld.x * 20.0 + uTime * 0.7);
+    float edge = smoothstep(0.12, 0.0, abs(vWorld.y - uReveal)) * step(uReveal, 1.6);
+    float body = (0.22 + 0.30 * fres + 0.05 * lat) * form + 0.10 * fres;
+    body *= mix(0.86, 1.12, scan);
+    vec3 col = uColor * body + uColor * edge * 2.2;
+    float a = clamp((body * 0.95 + edge) * uOpacity * uFlicker, 0.0, 1.0);
+    gl_FragColor = vec4(col, a);
+  }`;
+
+function holoMaterial(opacityScale = 1) {
+  const m = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor:   { value: CYAN.clone() },
+      uLight:   { value: new THREE.Vector3(0.45, 1.0, 0.6).normalize() },
+      uTime:    { value: 0 },
+      uReveal:  { value: TOP },
+      uFlicker: { value: 1 },
+      uOpacity: { value: 1 },
+    },
+    vertexShader: HOLO_VERT,
+    fragmentShader: HOLO_FRAG,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+  });
+  m.userData.k = opacityScale;
+  return m;
+}
+
+function lineMaterial(opacity) {
+  return new THREE.LineBasicMaterial({
+    color: CYAN.clone(), transparent: true, opacity,
+    blending: THREE.AdditiveBlending, depthWrite: false });
+}
+
+/* ── renderer bundle + shared state ──────────────────────────────────────── */
+let R = null;
+let raf = 0, last = 0, spinResume = 0;
+let yaw = 0.62, pitch = -0.12;
+let baseColor = CYAN.clone(), phase = 'idle';
+let panelWants = false, running = false;
+let reveal = TOP;
+
+function effColor() {
+  return phase === 'break' ? GREEN : phase === 'ending' ? AMBER : baseColor;
+}
+function applyColor() {
+  if (!R) return;
+  const c = effColor();
+  R.holoMats.forEach(m => m.uniforms.uColor.value.copy(c));
+  R.lineMats.forEach(m => m.color.copy(c));
+  R.motes.material.color.copy(c);
+  R.scan.material.color.copy(phase === 'ending' ? AMBER : WHITE);
+}
+function triggerReveal() {
+  reveal = (running && !REDUCED.matches) ? -0.15 : TOP;
+  if (R) R.holoMats.forEach(m => m.uniforms.uReveal.value = reveal);
+}
+
+function resize() {
+  if (!R) return;
+  const w = R.stage.clientWidth || 340, h = R.stage.clientHeight || 240;
+  R.renderer.setSize(w, h, false);
+  R.camera.aspect = w / h;
+  R.camera.updateProjectionMatrix();
+  if (!running) R.renderer.render(R.scene, R.camera);
+}
+
+const BUCKET_K   = { hull: 1, wing: 0.85, dark: 0.32, tyre: 1 };
+const BUCKET_WIRE = { hull: 0.12, wing: 0.07, tyre: 0.3 };
+
+function mountModel(gltf, holoMats, lineMats, rig) {
+  const matFor = {};
+  gltf.scene.traverse((o) => {
+    if (!o.isMesh) return;
+    const bucket = o.name in BUCKET_K ? o.name : 'hull';
+    const k = o.userData.k ?? BUCKET_K[bucket];
+    if (!matFor[bucket]) { matFor[bucket] = holoMaterial(k); holoMats.push(matFor[bucket]); }
+    const geo = o.geometry;
+    geo.computeVertexNormals();
+    rig.add(new THREE.Mesh(geo, matFor[bucket]));
+    const wireOp = BUCKET_WIRE[bucket];
+    if (wireOp) {
+      const wm = lineMaterial(wireOp); lineMats.push(wm);
+      rig.add(new THREE.LineSegments(new THREE.WireframeGeometry(geo), wm));
+    }
+  });
+  applyColor();
+  triggerReveal();
+  if (R && !running) R.renderer.render(R.scene, R.camera);
+}
+
+function build(stage) {
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  renderer.setClearColor(0x000000, 0);
+  stage.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(39, 1, 0.1, 100);
+  camera.position.set(2.1, 1.7, 8.7);
+  camera.lookAt(0, 0.42, 0);
+
+  const holoMats = [];
+  const lineMats = [];
+  const rig = new THREE.Group();
+  rig.position.y = LIFT;
+  rig.rotation.set(pitch, yaw, 0);
+  scene.add(rig);
+
+  const projMat = lineMaterial(0.16); lineMats.push(projMat);
+  const projector = new THREE.LineSegments(projectorGeometry(), projMat);
+  projector.position.y = -0.02;
+  scene.add(projector);
+
+  const scan = new THREE.LineSegments(unitRingGeometry(56), new THREE.LineBasicMaterial({
+    color: WHITE.clone(), transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false }));
+  scene.add(scan);
+
+  const N = 74, mp = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const rr = Math.sqrt(Math.random()) * 2.7, a = Math.random() * Math.PI * 2;
+    mp[i * 3] = Math.cos(a) * rr;
+    mp[i * 3 + 1] = Math.random() * 2.6;
+    mp[i * 3 + 2] = Math.sin(a) * rr;
+  }
+  const moteG = new THREE.BufferGeometry();
+  moteG.setAttribute('position', new THREE.BufferAttribute(mp, 3));
+  const motes = new THREE.Points(moteG, new THREE.PointsMaterial({
+    color: CYAN.clone(), size: 0.038, transparent: true, opacity: 0.6,
+    blending: THREE.AdditiveBlending, depthWrite: false }));
+  scene.add(motes);
+
+  R = { renderer, scene, camera, rig, scan, motes, stage, holoMats, lineMats,
+        lineBase: lineMats.map(m => m.opacity), ready: false };
+  resize();
+
+  if ('ResizeObserver' in window) { new ResizeObserver(resize).observe(stage); }
+  else { window.addEventListener('resize', resize); }
+  wireDrag(stage);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopLoop();
+    else if (panelWants) startLoop();
+  });
+
+  new GLTFLoader().load(MODEL_URL, (gltf) => {
+    mountModel(gltf, holoMats, lineMats, rig);
+    R.lineBase = lineMats.map(m => m.opacity);
+    R.ready = true;
+    if (panelWants && !document.hidden) startLoop();
+  }, undefined, () => disable());
+}
+
+function disable() {
+  stopLoop();
+  const holo = document.getElementById('focusHolo');
+  if (holo) holo.hidden = true;
+  window.focusHologram = { start() {}, stop() {}, setColor() {}, setPhase() {} };
+}
+
+function wireDrag(stage) {
+  let id = null, px = 0, py = 0;
+  stage.addEventListener('pointerdown', (e) => {
+    id = e.pointerId; px = e.clientX; py = e.clientY;
+    stage.setPointerCapture(id); stage.classList.add('dragging');
+  });
+  stage.addEventListener('pointermove', (e) => {
+    if (id !== e.pointerId || !R) return;
+    yaw += (e.clientX - px) * 0.01;
+    pitch = Math.max(-0.9, Math.min(0.45, pitch + (e.clientY - py) * 0.006));
+    px = e.clientX; py = e.clientY;
+    spinResume = performance.now() + 2600;
+    R.rig.rotation.set(pitch, yaw, 0);
+    if (!running) R.renderer.render(R.scene, R.camera);
+  });
+  const end = (e) => {
+    if (id !== e.pointerId) return;
+    try { stage.releasePointerCapture(id); } catch (_) {}
+    id = null; stage.classList.remove('dragging');
+  };
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', end);
+}
+
+function frame(t) {
+  raf = 0;
+  if (!R || !running) return;
+  const dt = last ? Math.min(0.05, (t - last) / 1000) : 0.016;
+  last = t;
+  const reduced = REDUCED.matches;
+  const idle = phase === 'idle' || phase === 'paused';
+
+  const speed = phase === 'ending' ? 1.1 : phase === 'focus' ? 0.4
+    : phase === 'break' ? 0.24 : 0.15;
+  if (!reduced && t > spinResume) yaw += speed * dt;
+  R.rig.rotation.set(pitch, yaw, 0);
+  R.rig.position.y = LIFT + (reduced ? 0 : Math.sin(t * 0.0016) * 0.055);
+  R.rig.rotation.z = reduced ? 0 : Math.sin(t * 0.0011) * 0.02;
+
+  if (reveal < TOP) reveal = reduced ? TOP : Math.min(TOP, reveal + dt * 2.6);
+
+  const flick = reduced ? 1
+    : (0.84 + Math.random() * 0.16) * (phase === 'ending' ? 0.72 + 0.28 * Math.sin(t / 46) : 1);
+  const op = idle ? 0.6 : 0.95;
+  R.holoMats.forEach(m => {
+    m.uniforms.uTime.value = t / 1000;
+    m.uniforms.uFlicker.value = flick;
+    m.uniforms.uReveal.value = reveal;
+    m.uniforms.uOpacity.value = op * (m.userData.k ?? 1);
+  });
+  R.lineMats.forEach((m, i) => { m.opacity = R.lineBase[i] * flick * (idle ? 0.7 : 1); });
+
+  if (!reduced && !idle) {
+    const cyc = (t % 2400) / 2400;
+    R.scan.position.y = cyc * 1.9 - 0.05;
+    R.scan.scale.setScalar(0.5 + cyc * 1.15);
+    R.scan.material.opacity = 0.42 * (1 - cyc) * (phase === 'ending' ? 1.8 : 1);
+  } else {
+    R.scan.material.opacity = 0;
+  }
+
+  const mp = R.motes.geometry.attributes.position;
+  if (!reduced) {
+    for (let i = 0; i < mp.count; i++) {
+      let y = mp.getY(i) + dt * 0.16;
+      if (y > 2.6) y -= 2.6;
+      mp.setY(i, y);
+    }
+    mp.needsUpdate = true;
+  }
+  R.motes.material.opacity = (idle ? 0.35 : 0.6) * (reduced ? 1 : 0.7 + 0.3 * Math.random());
+
+  R.renderer.render(R.scene, R.camera);
+  raf = requestAnimationFrame(frame);
+}
+
+function startLoop() {
+  if (!R || !R.ready || running) return;
+  running = true; last = 0;
+  triggerReveal();
+  raf = requestAnimationFrame(frame);
+}
+function stopLoop() {
+  running = false;
+  if (raf) { cancelAnimationFrame(raf); raf = 0; }
+}
+
+function parseColor(css) {
+  if (!css || /var\(/.test(css)) return null;
+  try { return new THREE.Color(css.trim()); } catch (_) { return null; }
+}
+
+window.focusHologram = {
+  start() {
+    panelWants = true;
+    if (!R) {
+      try { build(document.getElementById('focusHoloStage')); }
+      catch (e) { disable(); return; }
+    }
+    if (R && R.ready && !document.hidden) startLoop();
+  },
+  stop() { panelWants = false; stopLoop(); },
+  setColor(css) {
+    const c = parseColor(css);
+    if (c) baseColor.copy(c);
+    applyColor();
+    if (R && !running) R.renderer.render(R.scene, R.camera);
+  },
+  setPhase(p) {
+    const next = p || 'idle';
+    const changed = next !== phase;
+    phase = next;
+    applyColor();
+    if (changed && phase !== 'idle') triggerReveal();
+    if (R && !running) {
+      reveal = TOP;
+      R.holoMats.forEach(m => m.uniforms.uReveal.value = TOP);
+      R.renderer.render(R.scene, R.camera);
+    }
+  },
+};
+window.dispatchEvent(new Event('focus-hologram-ready'));
+</script>
+</body></html>

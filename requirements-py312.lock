@@ -1,0 +1,18 @@
+# Reproducible Windows/Python 3.12 runtime snapshot.
+# Regenerate with:
+#   python -m pip freeze --local > requirements-py312.lock
+-r requirements.txt
+beautifulsoup4==4.15.0
+requests==2.34.2
+lxml==6.1.1
+pytest==9.1.1
+mypy==2.3.0
+google-api-python-client==2.198.0
+google-auth-oauthlib==1.4.0
+pypdf==6.14.2
+pymupdf==1.28.0
+faster-whisper==1.2.1
+anthropic==0.121.0
+pywebview==6.2.1
+playwright==1.61.0
+urllib3==2.7.0

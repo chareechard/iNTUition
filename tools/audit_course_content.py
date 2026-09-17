@@ -10,9 +10,9 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ntu_learn_downloader import auth, rest
-from ntu_learn_downloader.contentcache import ContentCache
-from ntu_learn_downloader.sync import build_plan
+from intuition import auth, rest
+from intuition.contentcache import ContentCache
+from intuition.sync import build_plan
 
 
 def audit(download_root="NTU"):

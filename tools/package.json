@@ -1,0 +1,12 @@
+{
+  "name": "intuition-tools",
+  "private": true,
+  "type": "module",
+  "description": "Build-time asset generators (not part of the runtime or the Python package).",
+  "scripts": {
+    "build:chassis": "node build_focus_chassis.mjs"
+  },
+  "devDependencies": {
+    "three": "0.160.0"
+  }
+}
