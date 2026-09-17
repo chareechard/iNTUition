@@ -93,6 +93,46 @@ class TestSync(unittest.TestCase):
                 plan[0]["path"], os.path.join(root, "CE2003", "Tutorials", "a.pdf")
             )
 
+    def test_folder_name_that_sanitises_to_empty_keeps_its_level(self):
+        """A folder titled with only an emoji (or any content with no ASCII/Latin
+        remnant after NFKD normalisation) must not vanish from the tree - losing
+        the segment used to hoist every file inside it straight into the parent,
+        silently flattening that whole branch of the course."""
+        with TemporaryDirectory() as root:
+            nested = tree(
+                [
+                    {
+                        "type": "folder",
+                        "name": "\U0001F4CA",  # a single emoji, sanitises to ""
+                        "children": [file_node("a.pdf", "a.pdf")],
+                    }
+                ]
+            )
+            plan = sync.build_plan(nested, root)
+            self.assertEqual(len(plan), 1)
+            # Still nested under *some* folder, not hoisted to the course root.
+            self.assertNotEqual(plan[0]["rel_path"], "CE2003/a.pdf")
+            self.assertTrue(plan[0]["rel_path"].startswith("CE2003/folder-"))
+            self.assertTrue(plan[0]["rel_path"].endswith("/a.pdf"))
+            self.assertEqual(plan[0]["folder"], os.path.dirname(plan[0]["rel_path"]))
+
+    def test_empty_sibling_folder_names_do_not_collide(self):
+        """Two differently-named folders that both sanitise to "" must still end
+        up as two distinct folders, not merged into one (which would silently
+        overwrite same-named files from either branch)."""
+        with TemporaryDirectory() as root:
+            nested = tree(
+                [
+                    {"type": "folder", "name": "\U0001F4CA",
+                     "children": [file_node("a.pdf", "a.pdf")]},
+                    {"type": "folder", "name": "★",  # different emoji/symbol
+                     "children": [file_node("a.pdf", "a.pdf")]},
+                ]
+            )
+            plan = sync.build_plan(nested, root)
+            rel_paths = {e["rel_path"] for e in plan}
+            self.assertEqual(len(rel_paths), 2)
+
     def test_excessively_deep_ultra_tree_is_collapsed_not_dropped(self):
         node = file_node("lecture.pdf", "lecture.pdf")
         for n in range(8):

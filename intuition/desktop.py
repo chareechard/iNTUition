@@ -193,6 +193,8 @@ def run(download_root: Optional[str] = None, browser: bool = False) -> int:
             window = webview.create_window(
                 APP_NAME, url, width=1380, height=860, min_size=(960, 640),
                 background_color="#030712")
+            if window is None:
+                raise RuntimeError("Desktop window could not be created")
             window.events.shown += apply_windows_chrome_theme
             webview.start(gui="edgechromium", debug=False, private_mode=False)
             return 0

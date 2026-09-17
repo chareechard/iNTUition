@@ -18,8 +18,11 @@ Stored beside the ledger so it travels with the download folder.
 import json
 import os
 import re
+import threading
 from datetime import date, datetime, time, timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+from intuition.persistence import atomic_json_dump
 
 STORAGE_DIR = ".intuition"
 SCHEDULE_FILENAME = "schedule.json"
@@ -358,66 +361,65 @@ class Schedule:
         self.overrides: List[Dict] = []
         self.important_dates: List[Dict] = []
         self._loaded_mtime_ns = 0
+        self._lock = threading.RLock()
         self.load()
 
     def load(self):
-        if not os.path.exists(self.path):
-            return
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            data = data if isinstance(data, dict) else {}
-            self.sessions = data.get("sessions", [])
-            self.exams = data.get("exams", [])
-            self.courses = data.get("courses", [])
-            self.semester = data.get("semester", "")
-            self.imported_at = data.get("imported_at")
-            self.overrides = data.get("overrides", [])
-            self.important_dates = data.get("important_dates", [])
-            self._loaded_mtime_ns = os.stat(self.path).st_mtime_ns
-        except (ValueError, OSError):
-            self.sessions = []
+        with self._lock:
+            if not os.path.exists(self.path):
+                return
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                data = data if isinstance(data, dict) else {}
+                self.sessions = data.get("sessions", [])
+                self.exams = data.get("exams", [])
+                self.courses = data.get("courses", [])
+                self.semester = data.get("semester", "")
+                self.imported_at = data.get("imported_at")
+                self.overrides = data.get("overrides", [])
+                self.important_dates = data.get("important_dates", [])
+                self._loaded_mtime_ns = os.stat(self.path).st_mtime_ns
+            except (ValueError, OSError):
+                self.sessions = []
 
     def reload_if_changed(self) -> bool:
         """Reload when another process updated the persistent Temporal store."""
-        try:
-            modified = os.stat(self.path).st_mtime_ns
-        except OSError:
-            return False
-        if modified == self._loaded_mtime_ns:
-            return False
-        self.load()
-        return True
+        with self._lock:
+            try:
+                modified = os.stat(self.path).st_mtime_ns
+            except OSError:
+                return False
+            if modified == self._loaded_mtime_ns:
+                return False
+            self.load()
+            return True
 
     def save(self):
-        directory = os.path.dirname(self.path)
-        if directory and not os.path.isdir(directory):
-            os.makedirs(directory, exist_ok=True)
-        payload = {
-            "imported_at": self.imported_at
-            or datetime.now().isoformat(timespec="seconds"),
-            "sessions": self.sessions,
-            "exams": self.exams,
-            "courses": self.courses,
-            "semester": self.semester,
-            "overrides": self.overrides,
-            "important_dates": self.important_dates,
-        }
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=1)
-        os.replace(tmp, self.path)
-        self._loaded_mtime_ns = os.stat(self.path).st_mtime_ns
+        with self._lock:
+            payload = {
+                "imported_at": self.imported_at
+                or datetime.now().isoformat(timespec="seconds"),
+                "sessions": self.sessions,
+                "exams": self.exams,
+                "courses": self.courses,
+                "semester": self.semester,
+                "overrides": self.overrides,
+                "important_dates": self.important_dates,
+            }
+            atomic_json_dump(self.path, payload, indent=1)
+            self._loaded_mtime_ns = os.stat(self.path).st_mtime_ns
 
     def replace(self, sessions: List[Dict], exams=None, courses=None, semester=None):
-        self.sessions = dedupe(sessions)
-        if exams is not None:
-            self.exams = exams
-        if courses is not None:
-            self.courses = courses
-        if semester:
-            self.semester = semester
-        self.imported_at = datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            self.sessions = dedupe(sessions)
+            if exams is not None:
+                self.exams = exams
+            if courses is not None:
+                self.courses = courses
+            if semester:
+                self.semester = semester
+            self.imported_at = datetime.now().isoformat(timespec="seconds")
 
     def for_day(self, day_name: str, week: Optional[int] = None) -> List[Dict]:
         """Sessions on a day, optionally only those running in ``week``."""
@@ -433,7 +435,7 @@ class Schedule:
     def set_announcement_overrides(self, changes: List[Dict]):
         """Replace announcement-derived date exceptions with a validated set."""
         allowed = {"cancel", "change", "add", "pattern"}
-        clean = []
+        clean: List[Dict[str, Any]] = []
         for change in changes:
             action = str(change.get("action") or "").lower()
             course = str(change.get("course") or "").strip().upper()
@@ -457,7 +459,7 @@ class Schedule:
     def set_announcement_important_dates(self, events: List[Dict]):
         """Merge assessment milestones, letting announcements amend document dates."""
         allowed = {"midterm", "final", "quiz", "presentation", "oral", "assignment"}
-        clean = []
+        clean: List[Dict[str, Any]] = []
         for event in events:
             try:
                 datetime.strptime(str(event.get("date") or ""), "%Y-%m-%d")
@@ -467,9 +469,10 @@ class Schedule:
             course = str(event.get("course") or "").strip().upper()
             if kind not in allowed or not course:
                 continue
-            row = {key: str(event.get(key) or "").strip() for key in
-                   ("source_id", "source_title", "date", "course", "kind",
-                    "start", "end", "venue", "details")}
+            row: Dict[str, Any] = {
+                key: str(event.get(key) or "").strip() for key in
+                ("source_id", "source_title", "date", "course", "kind",
+                 "start", "end", "venue", "details")}
             row["course"], row["kind"] = course, kind
             text = "{} {}".format(row["details"], row["source_title"]).lower()
             labels = (

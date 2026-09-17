@@ -100,7 +100,7 @@ check rather than hard-coded - a separate small bug this investigation turned up
 |---|---|---|---|
 | `CHAT` | Ask FRIDAY | fast, cheap, disposable | `auto/coding:free` → `auto/fast` → `claude/claude-sonnet-5` |
 | `SCHOLAR` | Compendium, Research | rigorous, reproducible, cited | `claude/claude-opus-5` **only** |
-| `BULK` | triage, announcements, to-do enrichment | high volume, structured, low stakes | `auto/coding:free` → `auto/fast` |
+| `BULK` | triage, announcement TL;DR + de-duplication, to-do enrichment | high volume, structured, low stakes | `auto/coding:free` → `auto/fast` |
 | `VISION` | lasso snapshots | multimodal | `auto/best-vision` |
 
 `auto/coding:free` leads the chat ladder rather than the marginally faster `auto/fast`

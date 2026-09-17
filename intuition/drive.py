@@ -14,11 +14,15 @@ Google requires an OAuth client that belongs to *you*; there is no way to ship o
 your browser and Google hands the token straight back to the local flow - the tool never
 sees your Google password.
 """
+import base64
 import contextlib
+import html
 import math
 import os
+import posixpath
 import re
 import socket
+import tempfile
 import time
 import zipfile
 from collections import Counter
@@ -57,10 +61,15 @@ def _prefer_ipv4_dns():
 
 _prefer_ipv4_dns()
 
-# Only the app's own files are visible with drive.file, which is the narrowest scope
-# that still allows creating folders and uploading. It cannot read anything the tool
-# did not create.
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+# drive.file alone only ever sees files this app created or that were opened with it
+# through a picker - a student's own pre-existing Docs are invisible to it no matter
+# where they sit. drive.readonly adds read (list/get/export) access across the whole
+# Drive so "Search my Drive" can find and pull them too; write access for the app's
+# own mirrored tree still comes from drive.file.
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 GOOGLE_EXPORTS = {
@@ -87,6 +96,8 @@ DEFAULT_ROOT_FOLDER = "iNTUition"
 # deduplicated safely.
 LEGACY_ROOT_FOLDERS = ("NTULearn",)
 SEARCH_LIMIT = 6
+MAX_DRIVE_LIST_PAGES = 500
+MAX_DRIVE_LIST_ITEMS = 250_000
 SEARCH_CONCEPTS = {
     "lecture": {"lecture", "lectures", "slides", "slide", "video", "videos"},
     "tutorial": {"tutorial", "tutorials", "tut", "tuts"},
@@ -346,6 +357,52 @@ def native_search(service, files: List[Dict], query: str,
     return output
 
 
+def search_my_drive(service, query: str, limit: int = 25) -> List[Dict]:
+    """Search the whole Drive, not just the app's mirrored root - the only way to
+    find files a student created directly in Drive rather than through this app
+    (see the drive.readonly half of SCOPES).
+
+    Files found this way have no ancestry in the app's own folder tree, so there is
+    no real rel_path to derive the way list_files() does. A synthetic one is built
+    instead - "My Drive/<parent folder>/<name>" - which is enough for the existing
+    tree browser (tree_level splits purely on rel_path) and for matches_course()
+    elsewhere, as long as the real Drive folder name carries the course code, which
+    course folders typically do.
+    """
+    q = "trashed = false and (name contains '{v}' or fullText contains '{v}')".format(
+        v=_drive_query_value(query))
+    response = service.files().list(
+        q=q, fields="files(id,name,mimeType,size,modifiedTime,parents)",
+        pageSize=max(1, limit), orderBy="modifiedTime desc", spaces="drive",
+    ).execute()
+
+    parent_names: Dict[str, str] = {}
+
+    def _parent_name(parent_id: str) -> Optional[str]:
+        if parent_id not in parent_names:
+            try:
+                meta = service.files().get(fileId=parent_id, fields="name").execute()
+                parent_names[parent_id] = meta.get("name") or ""
+            except Exception:
+                parent_names[parent_id] = ""
+        return parent_names[parent_id] or None
+
+    found: List[Dict] = []
+    for item in response.get("files", [])[:limit]:
+        parents = item.get("parents") or []
+        parent_name = _parent_name(parents[0]) if parents else None
+        rel_path = "My Drive/{}/{}".format(parent_name, item["name"]) if parent_name \
+            else "My Drive/{}".format(item["name"])
+        found.append({
+            "id": item["id"], "name": item["name"], "rel_path": rel_path,
+            "mime_type": item.get("mimeType") or "application/octet-stream",
+            "size": int(item.get("size") or 0),
+            "modified": item.get("modifiedTime"),
+            "external": True,
+        })
+    return found
+
+
 def tree_level(files: List[Dict], prefix: str = "") -> Dict:
     """Group the flat ``list_files()`` inventory into one level of a folder tree.
 
@@ -415,13 +472,22 @@ def extract_learning_pages(path: str, limit: int = 40000) -> List[Tuple[int, str
                 names = [name for name in archive.namelist()
                          if name.startswith("ppt/slides/") and name.endswith(".xml")
                          and _SLIDE_NUM_RE.search(name)]
-                names.sort(key=lambda n: int(_SLIDE_NUM_RE.search(n).group(1)))
+                def slide_number(name: str) -> int:
+                    match = _SLIDE_NUM_RE.search(name)
+                    if match is None:
+                        return 0
+                    return int(match.group(1))
+
+                names.sort(key=slide_number)
                 pages = []
                 for name in names:
+                    match = _SLIDE_NUM_RE.search(name)
+                    if match is None:
+                        continue
                     root = ElementTree.fromstring(archive.read(name))
                     text = " ".join(node.text for node in root.iter()
                                     if node.text and node.text.strip())
-                    pages.append((int(_SLIDE_NUM_RE.search(name).group(1)), text))
+                    pages.append((int(match.group(1)), text))
         except Exception as exc:
             raise DriveError("Office document text extraction failed: {}".format(exc))
     elif extension == ".docx":
@@ -468,6 +534,298 @@ def extract_learning_pages(path: str, limit: int = 40000) -> List[Tuple[int, str
 def extract_learning_text(path: str, limit: int = 40000) -> str:
     """Extract bounded study text from common course-material formats."""
     return "\n".join(text for _page, text in extract_learning_pages(path, limit))
+
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+_WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_DOCREL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+_DOCX_IMAGE_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "gif": "image/gif", "bmp": "image/bmp", "tif": "image/tiff",
+    "tiff": "image/tiff", "svg": "image/svg+xml",
+}
+# emf/wmf are Windows metafiles no browser renders inline - skipped, not embedded.
+_DOCX_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+_DOCX_PAGE_TEMPLATE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {{ color-scheme: light dark; }}
+html, body {{ margin: 0; }}
+body {{
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #1a1c22; background: #fff;
+  padding: 40px clamp(16px, 5vw, 64px);
+}}
+main {{ max-width: 46rem; margin: 0 auto; }}
+h1, h2, h3, h4, h5, h6 {{ line-height: 1.25; margin: 1.6em 0 .5em; }}
+h1 {{ font-size: 1.8em; }} h2 {{ font-size: 1.45em; }} h3 {{ font-size: 1.2em; }}
+p {{ margin: 0 0 .9em; }}
+ul, ol {{ margin: 0 0 .9em; padding-left: 1.6em; }}
+li {{ margin: .2em 0; }}
+a {{ color: #2563eb; }}
+img {{ max-width: 100%; height: auto; }}
+table {{ border-collapse: collapse; margin: 0 0 1.1em; width: 100%; }}
+td, th {{ border: 1px solid #cdd2dc; padding: 6px 10px; vertical-align: top; }}
+@media (prefers-color-scheme: dark) {{
+  body {{ color: #d5d8e0; background: #14161c; }}
+  a {{ color: #6ea8fe; }}
+  td, th {{ border-color: #3a3f4b; }}
+}}
+</style></head><body><main>{body}</main></body></html>"""
+
+
+def _wtag(tag: str) -> str:
+    return "{{{}}}{}".format(_WORD_NS, tag)
+
+
+def _docrel(attr: str) -> str:
+    return "{{{}}}{}".format(_DOCREL_NS, attr)
+
+
+def _toggle_on(node) -> bool:
+    """A Word toggle property (``<w:b/>``) is on unless it carries ``w:val`` off."""
+    if node is None:
+        return False
+    return (node.get(_wtag("val")) or "true").lower() not in ("0", "false", "off")
+
+
+_HEADING_RE = re.compile(r"heading\s*([1-9])")
+
+
+class _DocxRenderer:
+    """Walk ``word/document.xml`` into semantic HTML for inline preview.
+
+    Word's body is a flat stream of paragraphs and tables; the browser can't
+    show a .docx natively and the material drawer loads /api/drive/content
+    straight into an <iframe>, so this turns the stream into headings,
+    bold/italic runs, lists, tables and inline images - enough for the tutorial
+    sheets and notes that arrive as .docx. Deliberately dependency-free, in the
+    same house style as ``extract_learning_pages``.
+    """
+
+    def __init__(self, archive: zipfile.ZipFile):
+        self.archive = archive
+        self.rels = self._load_rels()
+        self.numbering = self._load_numbering()
+        self._list_open: Optional[str] = None
+        self.has_content = False
+
+    def _load_rels(self) -> Dict[str, str]:
+        try:
+            root = ElementTree.fromstring(
+                self.archive.read("word/_rels/document.xml.rels"))
+        except (KeyError, ElementTree.ParseError):
+            return {}
+        rels: Dict[str, str] = {}
+        for node in root:
+            rid = node.get("Id")
+            if rid:
+                rels[rid] = node.get("Target", "")
+        return rels
+
+    def _load_numbering(self) -> Dict[str, str]:
+        """``numId`` -> ``"ol"`` / ``"ul"`` for the top list level."""
+        try:
+            root = ElementTree.fromstring(self.archive.read("word/numbering.xml"))
+        except (KeyError, ElementTree.ParseError):
+            return {}
+        abstract: Dict[str, str] = {}
+        for anum in root.findall(_wtag("abstractNum")):
+            abstract_id = anum.get(_wtag("abstractNumId"))
+            if not abstract_id:
+                continue
+            fmt = None
+            for lvl in anum.findall(_wtag("lvl")):
+                if lvl.get(_wtag("ilvl")) == "0":
+                    node = lvl.find(_wtag("numFmt"))
+                    fmt = node.get(_wtag("val")) if node is not None else None
+                    break
+            abstract[abstract_id] = (
+                "ul" if fmt in (None, "bullet", "none") else "ol")
+        numbering: Dict[str, str] = {}
+        for num in root.findall(_wtag("num")):
+            num_id = num.get(_wtag("numId"))
+            ref = num.find(_wtag("abstractNumId"))
+            ref_val = ref.get(_wtag("val")) if ref is not None else None
+            if num_id and ref_val:
+                numbering[num_id] = abstract.get(ref_val, "ul")
+        return numbering
+
+    def render(self) -> str:
+        document = ElementTree.fromstring(self.archive.read("word/document.xml"))
+        body = document.find(_wtag("body"))
+        if body is None:
+            return ""
+        parts: List[str] = []
+        for child in body:
+            if child.tag == _wtag("p"):
+                parts.append(self._paragraph(child))
+            elif child.tag == _wtag("tbl"):
+                self._close_list(parts)
+                parts.append(self._table(child))
+        self._close_list(parts)
+        return "".join(parts)
+
+    def _close_list(self, out: List[str]) -> None:
+        if self._list_open:
+            out.append("</{}>".format(self._list_open))
+            self._list_open = None
+
+    def _paragraph(self, para) -> str:
+        ppr = para.find(_wtag("pPr"))
+        style, list_kind = "", None
+        if ppr is not None:
+            pstyle = ppr.find(_wtag("pStyle"))
+            if pstyle is not None:
+                style = (pstyle.get(_wtag("val")) or "").lower()
+            numpr = ppr.find(_wtag("numPr"))
+            if numpr is not None:
+                num_id = numpr.find(_wtag("numId"))
+                if num_id is not None:
+                    list_kind = self.numbering.get(
+                        num_id.get(_wtag("val")), "ul")
+
+        inner = self._runs(para).strip()
+        out: List[str] = []
+        if list_kind:
+            if self._list_open != list_kind:
+                self._close_list(out)
+                out.append("<{}>".format(list_kind))
+                self._list_open = list_kind
+            out.append("<li>{}</li>".format(inner or "&nbsp;"))
+            self.has_content = True
+            return "".join(out)
+
+        self._close_list(out)
+        if not inner:
+            return "".join(out)  # blank line - spacing already comes from margins
+        heading = _HEADING_RE.match(style)
+        if heading:
+            tag = "h{}".format(heading.group(1))
+        elif style == "title":
+            tag = "h1"
+        else:
+            tag = "p"
+        out.append("<{0}>{1}</{0}>".format(tag, inner))
+        self.has_content = True
+        return "".join(out)
+
+    def _runs(self, parent) -> str:
+        parts: List[str] = []
+        for child in parent:
+            if child.tag == _wtag("r"):
+                parts.append(self._run(child))
+            elif child.tag == _wtag("hyperlink"):
+                inner = self._runs(child)
+                target = self.rels.get(child.get(_docrel("id")), "")
+                if inner and target:
+                    parts.append('<a href="{}" target="_blank" rel="noopener">'
+                                 "{}</a>".format(html.escape(target, quote=True),
+                                                 inner))
+                else:
+                    parts.append(inner)
+            elif child.tag in (_wtag("ins"), _wtag("smartTag")):
+                parts.append(self._runs(child))
+        return "".join(parts)
+
+    def _run(self, run) -> str:
+        rpr = run.find(_wtag("rPr"))
+        pieces: List[str] = []
+        for child in run:
+            if child.tag == _wtag("t"):
+                pieces.append(html.escape(child.text or ""))
+            elif child.tag == _wtag("tab"):
+                pieces.append(" ")
+            elif child.tag in (_wtag("br"), _wtag("cr")):
+                pieces.append("<br>")
+            elif child.tag == _wtag("drawing") or child.tag == _wtag("pict"):
+                pieces.append(self._image(child))
+        text = "".join(pieces)
+        if not text or rpr is None:
+            return text
+        if _toggle_on(rpr.find(_wtag("b"))):
+            text = "<strong>{}</strong>".format(text)
+        if _toggle_on(rpr.find(_wtag("i"))):
+            text = "<em>{}</em>".format(text)
+        if rpr.find(_wtag("u")) is not None:
+            text = "<u>{}</u>".format(text)
+        if _toggle_on(rpr.find(_wtag("strike"))):
+            text = "<s>{}</s>".format(text)
+        vert = rpr.find(_wtag("vertAlign"))
+        if vert is not None:
+            val = vert.get(_wtag("val"))
+            if val == "superscript":
+                text = "<sup>{}</sup>".format(text)
+            elif val == "subscript":
+                text = "<sub>{}</sub>".format(text)
+        return text
+
+    def _image(self, node) -> str:
+        blip = next((el for el in node.iter() if el.tag.endswith("}blip")), None)
+        rel_id = None
+        if blip is not None:
+            rel_id = blip.get(_docrel("embed")) or blip.get(_docrel("link"))
+        if rel_id is None:
+            imagedata = next((el for el in node.iter()
+                              if el.tag.endswith("}imagedata")), None)
+            if imagedata is not None:
+                rel_id = imagedata.get(_docrel("id"))
+        if not rel_id:
+            return ""
+        target = self.rels.get(rel_id, "")
+        if not target:
+            return ""
+        ext = target.rsplit(".", 1)[-1].lower() if "." in target else ""
+        mime = _DOCX_IMAGE_MIME.get(ext)
+        if not mime:
+            return ""
+        arcname = posixpath.normpath(posixpath.join("word", target))
+        try:
+            data = self.archive.read(arcname)
+        except KeyError:
+            return ""
+        if len(data) > _DOCX_MAX_IMAGE_BYTES:
+            return ""
+        return '<img src="data:{};base64,{}" alt="">'.format(
+            mime, base64.b64encode(data).decode("ascii"))
+
+    def _table(self, tbl) -> str:
+        self.has_content = True
+        saved, self._list_open = self._list_open, None
+        rows: List[str] = []
+        for tr in tbl.findall(_wtag("tr")):
+            cells: List[str] = []
+            for tc in tr.findall(_wtag("tc")):
+                body: List[str] = []
+                for child in tc:
+                    if child.tag == _wtag("p"):
+                        body.append(self._paragraph(child))
+                    elif child.tag == _wtag("tbl"):
+                        body.append(self._table(child))
+                self._close_list(body)
+                cells.append("<td>{}</td>".format("".join(body) or "&nbsp;"))
+            rows.append("<tr>{}</tr>".format("".join(cells)))
+        self._list_open = saved
+        return "<table>{}</table>".format("".join(rows))
+
+
+def docx_to_html(path: str) -> str:
+    """A standalone, styled HTML page rendering ``path`` (.docx) for inline preview.
+
+    Raises ``DriveError`` when the archive can't be parsed or holds no content.
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            renderer = _DocxRenderer(archive)
+            fragment = renderer.render()
+    except (zipfile.BadZipFile, KeyError, ElementTree.ParseError) as exc:
+        raise DriveError("This .docx could not be parsed for preview: {}".format(exc))
+    if not renderer.has_content:
+        raise DriveError("No readable content was found in this .docx")
+    return _DOCX_PAGE_TEMPLATE.format(body=fragment)
 
 
 # PNG and JPEG are the two raster formats pdflatex's graphicx driver embeds directly,
@@ -688,23 +1046,15 @@ def credentials_present() -> bool:
     return os.path.exists(CLIENT_SECRET_PATH)
 
 
-def inspect_client_secret() -> Dict:
-    """Validate the downloaded OAuth client JSON before we try to use it.
+def _classify_client_secret(data) -> Dict:
+    """Shared verdict for a parsed OAuth client JSON.
 
     The two mistakes that actually happen are downloading a *service account* key or a
     *Web application* client instead of a Desktop app client. Both fail later with
     unhelpful errors, so name the problem here.
     """
-    import json
-
-    if not credentials_present():
-        return {"ok": False, "problem": "No file at {}".format(CLIENT_SECRET_PATH)}
-    try:
-        with open(CLIENT_SECRET_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-    except ValueError as e:
-        return {"ok": False, "problem": "Not valid JSON ({})".format(e)}
-
+    if not isinstance(data, dict):
+        return {"ok": False, "problem": "Expected a JSON object."}
     if data.get("type") == "service_account":
         return {
             "ok": False,
@@ -724,13 +1074,99 @@ def inspect_client_secret() -> Dict:
             "problem": "Unrecognised client file: expected an 'installed' section "
                        "(Desktop app client).",
         }
+    installed = data["installed"]
+    return {"ok": True, "client_id": installed.get("client_id", ""),
+            "project": installed.get("project_id")}
 
-    client_id = data["installed"].get("client_id", "")
-    return {"ok": True, "client_id": client_id, "project": data["installed"].get("project_id")}
+
+def inspect_client_secret() -> Dict:
+    """Validate the OAuth client JSON on disk before we try to use it."""
+    import json
+
+    if not credentials_present():
+        return {"ok": False, "problem": "No file at {}".format(CLIENT_SECRET_PATH)}
+    try:
+        with open(CLIENT_SECRET_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except ValueError as e:
+        return {"ok": False, "problem": "Not valid JSON ({})".format(e)}
+    return _classify_client_secret(data)
+
+
+def save_client_secret(raw: str) -> Dict:
+    """Validate an uploaded OAuth client JSON and, only if it is a Desktop-app
+    client, store it at CLIENT_SECRET_PATH. Returns the same verdict shape as
+    :func:`inspect_client_secret`; the file is left untouched on any failure."""
+    import json
+
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        return {"ok": False, "problem": "Not valid JSON ({})".format(e)}
+    verdict = _classify_client_secret(data)
+    if not verdict.get("ok"):
+        return verdict
+
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".client-secret-", suffix=".tmp", dir=CONFIG_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, CLIENT_SECRET_PATH)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    try:
+        os.chmod(CLIENT_SECRET_PATH, 0o600)
+    except OSError:
+        pass
+    return verdict
 
 
 def token_present() -> bool:
     return os.path.exists(TOKEN_PATH)
+
+
+def link_interactively(open_browser: bool = True, timeout_seconds: int = 300):
+    """Run the Google consent flow now and cache the resulting token.
+
+    ``get_credentials`` only reaches the browser flow when no usable token is
+    cached, which is the wrong behaviour for the dashboard's explicit "Connect
+    Google Drive" button (and for reconnecting after a revoke). This always runs
+    a fresh consent.
+    """
+    _require_libs()
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    if not credentials_present():
+        raise DriveError("Missing OAuth client secret.\n\n" + SETUP_HELP)
+    verdict = inspect_client_secret()
+    if not verdict.get("ok"):
+        raise DriveError(verdict["problem"])
+
+    flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_PATH, SCOPES)
+    try:
+        creds = flow.run_local_server(
+            port=0, open_browser=open_browser, timeout_seconds=timeout_seconds,
+            authorization_prompt_message=(
+                "Opening your browser to authorise Google Drive access. "
+                "If it does not open, visit:\n{url}"),
+            success_message=(
+                "iNTUition is connected to Google Drive. You can close this tab."))
+    except TypeError:
+        # Older google-auth-oauthlib without timeout_seconds.
+        creds = flow.run_local_server(port=0, open_browser=open_browser)
+    _save_token(creds)
+    return creds
+
+
+def disconnect() -> None:
+    """Forget the cached Drive token (the OAuth client JSON is kept)."""
+    _clear_token()
 
 
 def get_credentials(interactive: bool = True):
@@ -747,6 +1183,14 @@ def get_credentials(interactive: bool = True):
             creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
         except ValueError:
             creds = None
+
+    if creds and not set(SCOPES).issubset(set(creds.scopes or [])):
+        # A token cached under an older, narrower SCOPES list (e.g. drive.file only)
+        # can't be silently upgraded by refreshing - a refresh token only ever
+        # carries the scopes it was originally consented to. Drop it so the flow
+        # below runs a fresh consent instead of reusing an insufficient grant.
+        _clear_token()
+        creds = None
 
     if creds and creds.valid:
         return creds
@@ -791,8 +1235,18 @@ def get_credentials(interactive: bool = True):
 
 def _save_token(creds):
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(TOKEN_PATH, "w", encoding="utf-8") as f:
-        f.write(creds.to_json())
+    fd, temporary = tempfile.mkstemp(prefix=".drive-token-", suffix=".tmp", dir=CONFIG_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(creds.to_json())
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, TOKEN_PATH)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
     try:
         os.chmod(TOKEN_PATH, 0o600)
     except OSError:
@@ -822,18 +1276,34 @@ def _walk_tree(service) -> Dict[str, List[Dict]]:
     wide fetch is the expensive part, and both callers walk the same parent links
     from a different root or with a different filter.
     """
-    items, token = [], None
-    while True:
+    items, token, seen_tokens = [], None, set()
+    for _page in range(MAX_DRIVE_LIST_PAGES):
+        if token in seen_tokens:
+            raise DriveError("Drive returned a repeating page token")
+        if token:
+            seen_tokens.add(token)
         response = service.files().list(
             q="trashed = false",
             fields="nextPageToken, files(id,name,mimeType,size,modifiedTime,parents)",
             pageSize=1000, pageToken=token, supportsAllDrives=True,
             includeItemsFromAllDrives=True,
         ).execute()
-        items.extend(response.get("files", []))
+        page_items = response.get("files", [])
+        if not isinstance(page_items, list) or any(
+            not isinstance(item, dict) or not item.get("id") or not item.get("name")
+            for item in page_items
+        ):
+            raise DriveError("Drive returned malformed inventory metadata")
+        items.extend(page_items)
+        if len(items) > MAX_DRIVE_LIST_ITEMS:
+            raise DriveError(
+                "Drive inventory exceeds the {} item safety limit".format(
+                    MAX_DRIVE_LIST_ITEMS))
         token = response.get("nextPageToken")
         if not token:
             break
+    else:
+        raise DriveError("Drive inventory exceeded the page safety limit")
     children: Dict[str, List[Dict]] = {}
     for item in items:
         for parent_id in item.get("parents") or []:
@@ -913,7 +1383,9 @@ class DriveMirror:
         root_id = self.root_id()
         children = _walk_tree(self.service)
 
-        found, pending, visited = [], [(root_id, [])], set()
+        found: List[Dict] = []
+        pending: List[Tuple[str, List[str]]] = [(root_id, [])]
+        visited: set[str] = set()
         while pending:
             parent_id, parts = pending.pop()
             if parent_id in visited:
@@ -962,6 +1434,24 @@ class DriveMirror:
         return response
 
 
+def list_files_from_roots(service, roots: List[str]) -> Tuple[List[Dict], Dict[str, int]]:
+    """List files below several Drive roots while preserving each logical path.
+
+    A Drive file ID is not enough to reconstruct the local destination: the path is
+    carried by the folder ancestry.  Keep this inventory operation in one place so
+    callers that have a stale cache can refresh it instead of falling back to a
+    filename-only path (which silently dumps a file at the download root).
+    """
+    by_id: Dict[str, Dict] = {}
+    counts: Dict[str, int] = {}
+    for root in dict.fromkeys(roots):
+        listed = DriveMirror(service, root_folder=root).list_files()
+        counts[root] = len(listed)
+        for item in listed:
+            by_id.setdefault(item["id"], item)
+    return sorted(by_id.values(), key=lambda item: item["rel_path"].lower()), counts
+
+
 def _pick_keeper(candidates: List[Dict], rel_path: str, ledger: Optional[Ledger]) -> Dict:
     """Choose which copy of a duplicated file survives.
 
@@ -988,7 +1478,10 @@ def _scan_root(service, root_folder: str) -> Tuple[List[Dict], List[Dict]]:
     root_id = mirror.root_id()
     children = _walk_tree(service)
 
-    files, folder_clusters, pending, visited = [], [], [(root_id, [])], set()
+    files: List[Dict] = []
+    folder_clusters: List[Dict] = []
+    pending: List[Tuple[str, List[str]]] = [(root_id, [])]
+    visited: set[str] = set()
     while pending:
         parent_id, parts = pending.pop()
         if parent_id in visited:
@@ -1076,12 +1569,17 @@ def pull_file(service, item: Dict, download_root: str,
 
     root = os.path.abspath(download_root)
     rel_path = item["rel_path"]
-    export = GOOGLE_EXPORTS.get(item.get("mime_type"))
+    export = GOOGLE_EXPORTS.get(item.get("mime_type") or "")
     if export and not rel_path.lower().endswith(export[1]):
         rel_path += export[1]
     normalized = os.path.normpath(rel_path.replace("/", os.sep))
-    logical_target = os.path.abspath(os.path.join(root, normalized))
-    if os.path.commonpath([root, logical_target]) != root or normalized in (".", ".."):
+    logical_target = os.path.realpath(os.path.join(root, normalized))
+    root_real = os.path.realpath(root)
+    try:
+        inside_root = os.path.commonpath([root_real, logical_target]) == root_real
+    except ValueError:
+        inside_root = False
+    if not inside_root or normalized in (".", ".."):
         raise DriveError("Unsafe Drive path: {}".format(item["rel_path"]))
     # A Drive-mirrored rel_path carries no length limit, unlike the on-disk paths
     # sync.py produces when files are first pulled off Blackboard - a deeply nested
@@ -1090,7 +1588,12 @@ def pull_file(service, item: Dict, download_root: str,
     # already shortens the original download.
     target = utils.shorten_path_for_disk(root, rel_path)
     os.makedirs(os.path.dirname(target), exist_ok=True)
-    temporary = target + ".pulling"
+    fd, temporary = tempfile.mkstemp(
+        prefix=".{}-".format(os.path.basename(target)),
+        suffix=".pulling",
+        dir=os.path.dirname(target),
+    )
+    os.close(fd)
     try:
         if export:
             request = service.files().export_media(fileId=item["id"], mimeType=export[0])
@@ -1104,7 +1607,7 @@ def pull_file(service, item: Dict, download_root: str,
                 if status and progress:
                     progress(status.progress())
         expected = int(item.get("size") or 0)
-        if expected and os.path.getsize(temporary) != expected:
+        if expected and not export and os.path.getsize(temporary) != expected:
             raise DriveError("Size mismatch while pulling {}".format(item["rel_path"]))
         os.replace(temporary, target)
         return target
@@ -1163,6 +1666,8 @@ def push_file(
     )
 
     if move:
+        # Make the archive record durable before deleting the only local copy.
+        ledger.save()
         os.remove(local_path)
         _prune_empty_dirs(os.path.dirname(local_path), download_root)
 
@@ -1176,9 +1681,9 @@ def push_file(
 
 def _prune_empty_dirs(directory: str, stop_at: str):
     """Walk upward removing directories left empty by the move, never past the root."""
-    stop_at = os.path.abspath(stop_at)
-    directory = os.path.abspath(directory)
-    while directory.startswith(stop_at) and directory != stop_at:
+    stop_at = os.path.realpath(stop_at)
+    directory = os.path.realpath(directory)
+    while directory != stop_at and os.path.commonpath((stop_at, directory)) == stop_at:
         try:
             if os.listdir(directory):
                 return

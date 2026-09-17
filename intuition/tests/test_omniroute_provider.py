@@ -100,6 +100,30 @@ def test_running_accepts_http_error_as_responsive_gateway():
         assert omniroute_provider.running() is True
 
 
+def test_models_backs_off_after_a_failed_probe():
+    """A down/wedged gateway must not cost every /api/state poll a full timeout."""
+    omniroute_provider._models_cache.update(at=0.0, ids=[], fail_until=0.0)
+    with patch.object(omniroute_provider.request, "urlopen",
+                      side_effect=OSError("connection refused")) as call:
+        assert omniroute_provider.models() == []
+        # Second call is inside the backoff window - no new request is issued.
+        assert omniroute_provider.models() == []
+    assert call.call_count == 1
+    assert omniroute_provider._models_cache["fail_until"] > 0.0
+    omniroute_provider._models_cache.update(at=0.0, ids=[], fail_until=0.0)
+
+
+def test_models_refresh_ignores_backoff():
+    omniroute_provider._models_cache.update(
+        at=0.0, ids=[], fail_until=omniroute_provider.time.monotonic() + 999)
+    body = {"data": [{"id": "auto/fast"}]}
+    with patch.object(omniroute_provider.request, "urlopen",
+                      return_value=Response(json.dumps(body).encode())):
+        assert omniroute_provider.models(refresh=True) == ["auto/fast"]
+    assert omniroute_provider._models_cache["fail_until"] == 0.0
+    omniroute_provider._models_cache.update(at=0.0, ids=[], fail_until=0.0)
+
+
 def test_start_clears_stale_gateway_before_launching():
     process = type("Process", (), {"poll": lambda self: None})()
     with patch.object(omniroute_provider, "running",

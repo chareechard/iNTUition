@@ -123,7 +123,7 @@ class TestCurrency(unittest.TestCase):
         """Time travel: in Jan 2027 the 26S1 courses stop being current."""
         current, other, _ = semester.split_by_currency(
             REAL_CURRENT + REAL_PAST, date(2027, 1, 15))
-        self.assertEqual(current, [], "no 26S2 courses exist in this synthetic input yet")
+        self.assertEqual(current, [], "no 26S2 courses exist in this fixture yet")
         self.assertEqual(len(other), 12)
 
     def test_a_future_s2_course_becomes_current_in_january(self):

@@ -1,18 +1,5 @@
-# URLs for authentication
-#
-# NOTE (2026): NTU moved iNTUition from a self-hosted Blackboard Learn Original install
-# behind ADFS to Blackboard Learn SaaS (4000.x, Ultra base navigation) behind Microsoft
-# Entra ID. The ADFS endpoints below are kept only so the legacy authenticate() flow can
-# report a precise error; they are no longer part of NTU's login chain.
+# Blackboard and local authentication URLs.
 NTULEARN_URL = "https://ntulearn.ntu.edu.sg"
-
-# apId changed from _140_1 to _4980_1 when NTU migrated to Blackboard SaaS.
-NTULEARN_AUTH_SAML_URL = "https://ntulearn.ntu.edu.sg/auth-saml/saml/login?apId=_4980_1&redirectUrl=https%3A%2F%2Fntulearn.ntu.edu.sg%2Fultra"
-SAML_SSO_URL = "https://ntulearn.ntu.edu.sg/auth-saml/saml/SSO"
-
-# Legacy ADFS identity provider - decommissioned from the iNTUition login chain.
-LOGINFS_HOSTNAME = "https://loginfs.ntu.edu.sg"
-LOGINFS_URL = LOGINFS_HOSTNAME + "/adfs/ls/"
 
 # Current identity provider (Microsoft Entra ID). Interactive login only (MFA enforced).
 ENTRA_TENANT_ID = "15ce9348-be2a-462b-8fc0-e1765a9b204a"

@@ -25,7 +25,7 @@ import json
 import os
 import shutil
 import subprocess
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 DEFAULT_BINARY = os.environ.get("INTUITION_CLAUDE_BIN", "claude")
 DEFAULT_TIMEOUT = 600
@@ -156,9 +156,9 @@ def run(
                         max_usd=max_usd, cli=cli,
                         prompt_on_stdin=prompt_on_stdin)
     call = runner or subprocess.run
-    kwargs = dict(capture_output=True, text=True, cwd=cwd, timeout=timeout,
-                  encoding="utf-8", errors="replace",
-                  creationflags=no_window())
+    kwargs: Dict[str, Any] = dict(capture_output=True, text=True, cwd=cwd,
+                                  timeout=timeout, encoding="utf-8", errors="replace",
+                                  creationflags=no_window())
     if prompt_on_stdin:
         kwargs["input"] = prompt
 

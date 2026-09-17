@@ -4,6 +4,7 @@ lxml>=4.5.1
 
 # test only
 pytest>=7.0
+mypy>=1.11
 
 # Google Drive pipeline (optional; only needed for drive_push / the dashboard's Push button)
 google-api-python-client>=2.0

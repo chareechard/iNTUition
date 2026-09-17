@@ -121,9 +121,13 @@ def complete(prompt: str, system: str, preferred: Optional[str] = None,
             "data": base64.b64encode(data).decode("ascii")}})
     content.append({"type": "text", "text": prompt})
     try:
-        message = client.messages.create(
-            model=model or research.MODEL, max_tokens=max_tokens, system=system,
-            messages=[{"role": "user", "content": content}])
+        # Streamed, same as research.research()'s own API call - a high max_tokens
+        # (Compendium's scholar-tier composing call in particular) can run well past
+        # the non-streaming timeout; only the final message is needed.
+        with client.messages.stream(
+                model=model or research.MODEL, max_tokens=max_tokens, system=system,
+                messages=[{"role": "user", "content": content}]) as stream:
+            message = stream.get_final_message()
     except Exception as exc:
         raise ProviderError(str(exc))
     text = research._text(message)
@@ -149,7 +153,7 @@ class Attempt(NamedTuple):
 TIERS = {
     "chat":    [Attempt("auto/coding:free", 25), Attempt("auto/fast", 25),
                 Attempt("claude/claude-sonnet-5", 60)],
-    "scholar": [Attempt("claude/claude-opus-5", 300)],
+    "scholar": [Attempt("claude/claude-opus-5", 600)],
     "bulk":    [Attempt("auto/coding:free", 45), Attempt("auto/fast", 45)],
     "vision":  [Attempt("auto/best-vision", 60)],
 }
@@ -182,9 +186,13 @@ def complete_tier(tier: str, prompt: str, system: str, preferred: Optional[str] 
     if backend != research.BACKEND_OMNIROUTE:
         # OmniRoute is not in play, so there is no ladder to walk - the tier's model
         # names would mean nothing on the CLI/API backend. Scholar still insists on the
-        # model docs/ai-infrastructure.md pins it to; every other tier takes whatever
-        # that backend's normal default is.
-        tier_model = research.MODEL if tier == "scholar" else None
+        # model docs/ai-infrastructure.md pins it to, named the way each backend
+        # expects it (the CLI takes the short alias, the API the full id); every
+        # other tier takes whatever that backend's normal default is.
+        tier_model = None
+        if tier == "scholar":
+            tier_model = (research.CLI_MODEL if backend == research.BACKEND_CLI
+                          else research.MODEL)
         result = complete(prompt, system, preferred=preferred, max_tokens=max_tokens,
                           download_root=download_root, model=tier_model,
                           json_schema=json_schema, images=images)

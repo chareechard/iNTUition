@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib import error, request
 from urllib.parse import urlparse
 
@@ -17,9 +17,17 @@ DEFAULT_URL = "http://127.0.0.1:20128"
 MODEL = "auto"
 _start_lock = threading.Lock()
 _models_lock = threading.Lock()
-_models_cache = {"at": 0.0, "ids": []}
+_models_cache: Dict[str, Any] = {"at": 0.0, "ids": [], "fail_until": 0.0}
 MODEL_CACHE_SECONDS = 300
-_vision_failure = {"until": 0.0, "error": ""}
+# When the gateway is unreachable or wedged (its sockets pile up in CLOSE_WAIT),
+# every /v1/models probe blocks for the full timeout. snapshot() calls models()
+# on every /api/state poll, so without a negative cache one slow gateway stalls
+# the whole dashboard. Back off for this long after a failed probe.
+MODEL_FAILURE_BACKOFF_SECONDS = 45
+_running_lock = threading.Lock()
+_running_cache: Dict[str, float] = {"at": 0.0, "ok": 0.0}
+RUNNING_CACHE_SECONDS = 3.0
+_vision_failure: Dict[str, Any] = {"until": 0.0, "error": ""}
 VISION_RETRY_SECONDS = 300
 
 
@@ -48,7 +56,25 @@ def managed_locally() -> bool:
     return _local_default()
 
 
-def running(timeout: float = 0.8) -> bool:
+def running(timeout: float = 0.8, use_cache: bool = False) -> bool:
+    # status() is consulted several times per /api/state poll (directly and via
+    # todo_ai_choice); with use_cache it keeps a brief positive-result cache so a
+    # healthy gateway does not pay one connect() per consult. A negative result is
+    # never cached - a gateway that just came up should be picked up next poll.
+    # The startup path in ensure_running() must never see a cached result, so the
+    # cache is opt-in.
+    if use_cache:
+        with _running_lock:
+            if time.monotonic() - _running_cache["at"] < RUNNING_CACHE_SECONDS:
+                return bool(_running_cache["ok"])
+    ok = _running_probe(timeout)
+    if use_cache and ok:
+        with _running_lock:
+            _running_cache.update(at=time.monotonic(), ok=1.0)
+    return ok
+
+
+def _running_probe(timeout: float = 0.8) -> bool:
     # Do not probe readiness with a bare TCP connection. OmniRoute's HTTP server
     # can retain those incomplete connections in CLOSE_WAIT; the dashboard polls
     # status frequently, eventually wedging an otherwise healthy gateway. A real
@@ -69,7 +95,7 @@ def running(timeout: float = 0.8) -> bool:
 
 
 def status() -> Dict:
-    is_running = running()
+    is_running = running(use_cache=True)
     binary = executable()
     return {
         "backend": "omniroute",
@@ -86,9 +112,14 @@ def models(timeout: float = 10.0, refresh: bool = False):
     """Return OmniRoute's live model ids, cached to keep dashboard polling cheap."""
     now = time.monotonic()
     with _models_lock:
-        if (_models_cache["ids"] and not refresh
-                and now - _models_cache["at"] < MODEL_CACHE_SECONDS):
-            return list(_models_cache["ids"])
+        if not refresh:
+            if (_models_cache["ids"]
+                    and now - _models_cache["at"] < MODEL_CACHE_SECONDS):
+                return list(_models_cache["ids"])
+            # A recent probe already failed - do not block the caller (often the
+            # /api/state poll) on another full timeout against a down gateway.
+            if now < _models_cache["fail_until"]:
+                return list(_models_cache["ids"])
     req = request.Request(base_url() + "/v1/models", method="GET")
     api_key = os.environ.get("OMNIROUTE_API_KEY")
     if api_key:
@@ -100,9 +131,10 @@ def models(timeout: float = 10.0, refresh: bool = False):
                if isinstance(row, dict) and row.get("id")]
     except (OSError, error.URLError, ValueError, TypeError):
         with _models_lock:
+            _models_cache["fail_until"] = now + MODEL_FAILURE_BACKOFF_SECONDS
             return list(_models_cache["ids"])
     with _models_lock:
-        _models_cache.update(at=now, ids=ids)
+        _models_cache.update(at=now, ids=ids, fail_until=0.0)
     return list(ids)
 
 
@@ -208,7 +240,7 @@ def complete(prompt: str, system: str, max_tokens: int = 1200,
              model: str = MODEL, timeout: Optional[float] = None,
              images: Optional[List[bytes]] = None) -> Dict:
     ensure_running()
-    user_content = prompt
+    user_content: Any = prompt
     if images:
         # Same OpenAI-style content-block shape complete_image() already proves out
         # for a single snapshot, generalised to N ordered page images plus the text.
@@ -315,4 +347,5 @@ def complete_image(prompt: str, system: str, image_data_url: str,
     if not text:
         raise OmniRouteError("Snapshot analysis returned no text")
     return {"text": text, "backend": "omniroute",
-            "model": data.get("model") or vision_model}
+            "model": data.get("model") or vision_model,
+            "finish_reason": data["choices"][0].get("finish_reason")}

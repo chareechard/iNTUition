@@ -129,6 +129,35 @@ class TestLint(unittest.TestCase):
         body = "\\begin{verbatim}\nx & y, 100% no closing tag\n"
         self.assertEqual(latex.lint(body), [])
 
+    def test_balanced_braces_across_commands_are_not_flagged(self):
+        body = ("\\section{Intro}\n\\texttt{foo}\n"
+                "\\srcref{Operating Systems}{42}\n\\srcfig{1}{A caption}\n")
+        self.assertEqual(latex.lint(body), [])
+
+    def test_escaped_literal_braces_are_not_counted(self):
+        self.assertEqual(latex.lint("the set \\{1, 2, 3\\} is finite\n"), [])
+
+    def test_extra_closing_brace_in_a_heading_is_flagged_with_its_line(self):
+        body = "\\section{Intro}\n\nSome prose.\n\n\\subsection{Cost model}}\n"
+        violations = latex.lint(body)
+        self.assertTrue(any("line 5" in v and "closing brace" in v for v in violations),
+                        violations)
+
+    def test_unclosed_brace_is_flagged_at_its_opening_line(self):
+        body = "\\section{Cost model\n\nProse continues for a while.\n"
+        violations = latex.lint(body)
+        self.assertTrue(any("line 1" in v and "never closed" in v for v in violations),
+                        violations)
+
+    def test_braces_inside_verbatim_do_not_count_toward_balance(self):
+        body = ("\\begin{verbatim}\nif (x) { return; }\n\\end{verbatim}\n"
+                "\\section{After}\n")
+        self.assertEqual(latex.lint(body), [])
+
+    def test_math_mode_braces_still_have_to_balance(self):
+        violations = latex.lint("\\(x^{2\\) and the rest\n")
+        self.assertTrue(any("never closed" in v for v in violations), violations)
+
 
 class TestAssemble(unittest.TestCase):
     def test_body_is_wrapped_in_the_fixed_preamble(self):
@@ -178,6 +207,19 @@ class TestExtractErrors(unittest.TestCase):
 
     def test_no_bang_lines_returns_empty(self):
         self.assertEqual(latex.extract_errors("nothing wrong here\n"), [])
+
+    def test_extra_brace_error_pulls_in_the_later_source_line(self):
+        log = (
+            "! Argument of \\H@old@sect has an extra }.\n"
+            "<inserted text> \n"
+            "                \\par \n"
+            "l.148 \\subsection{Amortised cost}}\n"
+            "                                  \n"
+        )
+        errors = latex.extract_errors(log)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("extra }", errors[0])
+        self.assertIn("l.148", errors[0])
 
 
 class TestToolingStatus(unittest.TestCase):

@@ -64,6 +64,26 @@ def _branch_hash(logical_rel: str) -> str:
     return hashlib.sha256(logical_rel.encode("utf-8")).hexdigest()[:_HASH_LEN]
 
 
+def _folder_segment(raw_name: str, parent_logical: str) -> str:
+    """A guaranteed non-empty path segment for one Blackboard folder title.
+
+    sanitise_filename can legitimately reduce a title to nothing - it keeps only
+    what NFKD/ASCII normalisation and a conservative character set survive, so a
+    folder named with a single emoji, a lone symbol, or an unconvertible script
+    (no Latin decomposition) sanitises to "". The caller used to join that empty
+    segment with ``"/".join(..., if p)``, which silently dropped it - hoisting
+    every file inside straight into the parent folder and flattening the course's
+    real content-area/tutorial/exam structure into one pile, with no warning and
+    a real risk of two same-named files from different original folders
+    colliding on disk. A stable hash-based placeholder keeps the folder level
+    (and therefore the rest of the tree's structure) intact instead.
+    """
+    segment = sanitise_filename(raw_name)
+    if segment:
+        return segment
+    return "folder-{}".format(_branch_hash("{}/{}".format(parent_logical, raw_name)))
+
+
 # The REST attachment download URL, and the bbcswebdav links used by files embedded
 # in an Ultra document body. Both carry ids that survive the item being moved.
 _REST_ATTACHMENT = re.compile(
@@ -252,7 +272,7 @@ def build_plan(
         node_type = node.get("type")
 
         if node_type == "folder":
-            segment = sanitise_filename(node.get("name", ""))
+            segment = _folder_segment(node.get("name", ""), logical)
             child_logical = "/".join(p for p in (logical, segment) if p)
             folder_path, intact = disk_folder(current_path, segment, child_logical)
             child_legacy = legacy_folder(legacy, segment)

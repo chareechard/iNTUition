@@ -13,6 +13,7 @@ setuptools.setup(
     # The iNTUition dashboard page lives on disk rather than in a string literal.
     package_data={"intuition": [
         "static/*.html",
+        "data/*.json",
         "static/vendor/katex/*.css", "static/vendor/katex/*.js",
         "static/vendor/katex/LICENSE",
         "static/vendor/katex/contrib/*.js",
@@ -27,7 +28,7 @@ setuptools.setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.7",
+    python_requires=">=3.10",
     install_requires=["beautifulsoup4>=4.7.1", "requests>=2.22.0", "lxml>=4.5.1"],
     # Drive support is optional; the rest of the tool runs without it.
     extras_require={

@@ -154,6 +154,53 @@ class TestCleanText(unittest.TestCase):
         self.assertEqual(summary._clean_text(body), body)
 
 
+class TestCleanExtractedText(unittest.TestCase):
+    """The input-side pass that undoes deterministic slide/PDF text-layer defects
+    before the corpus reaches the model (distinct from _clean_text, which runs on
+    the model's LaTeX output)."""
+
+    def test_ligatures_are_expanded(self):
+        self.assertEqual(
+            summary._clean_extracted_text("\ufb01rst di\ufb00erence, \ufb02ux"),
+            "first difference, flux")
+
+    def test_symbol_font_bullet_glyphs_become_dashes(self):
+        self.assertEqual(
+            summary._clean_extracted_text("\uf0b7 one\n  \u25aa two\n"),
+            "- one\n  - two\n")
+
+    def test_mojibake_bullet_becomes_a_dash(self):
+        self.assertEqual(summary._clean_extracted_text("\u00c2\u00b7 item"), "- item")
+
+    def test_bare_middle_dot_is_left_alone(self):
+        # U+00B7 bare is also a multiplication sign - only its mojibake form is a bullet
+        self.assertEqual(summary._clean_extracted_text("a \u00b7 b"), "a \u00b7 b")
+
+    def test_soft_line_wrap_hyphenation_is_rejoined(self):
+        self.assertEqual(
+            summary._clean_extracted_text("differ-\nentiability of the map"),
+            "differentiability of the map")
+
+    def test_a_real_hyphenated_line_end_between_words_is_kept(self):
+        # newline then an uppercase / a digit is not the lower-lower wrap pattern
+        self.assertEqual(
+            summary._clean_extracted_text("well-\nKnown result"),
+            "well-\nKnown result")
+
+    def test_zero_width_and_soft_hyphen_and_nbsp_are_normalised(self):
+        self.assertEqual(
+            summary._clean_extracted_text("cont\u00adinuous\u200b at\u00a0x_0"),
+            "continuous at x_0")
+
+    def test_ordinary_prose_and_maths_is_untouched(self):
+        s = "If f(x,y) = xy/(x^2+y^2) then the limit as (x,y)->(0,0) does not exist.\n"
+        self.assertEqual(summary._clean_extracted_text(s), s)
+
+    def test_page_marked_applies_the_cleanup(self):
+        marked = summary._page_marked([(19, "\uf0b7 limit\ndoes not exist")])
+        self.assertEqual(marked, "[[p.19]]\n- limit\ndoes not exist")
+
+
 class TestExtractReport(unittest.TestCase):
     def test_extracts_between_markers(self):
         text = ("% BEGIN BODY\n\\section{X}\n% END BODY\n\n"

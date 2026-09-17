@@ -33,7 +33,7 @@ and browser profiles are deliberately outside this map and are ignored by Git.
 - `dashboard.py` — HTTP server, dashboard state, and feature orchestration.
 - `notes.py` — local notes and recall cards.
 - `chat_memory.py` — material-scoped conversation memory.
-- `summary.py`, `latex.py`, `compendium.py` — summary and document-generation features.
+- `summary.py`, `latex.py`, `latex.py` — summary and document-generation features.
 - `todo.py` — local task/query storage and AI assistance.
 - `lab.py`, `lab_runtime.py`, `lab_analysis.py` — code-lab editing, execution, and analysis.
 - `materials.py` — material selection and text extraction.
@@ -41,7 +41,9 @@ and browser profiles are deliberately outside this map and are ignored by Git.
 ### Academic data and optional integrations
 
 - `schedule.py`, `schedule_import.py` — timetable storage and import.
-- `announcements.py` — announcement extraction and dashboard feed.
+- `announcements.py` — announcement extraction and dashboard feed, including
+  deterministic body cleaning, cross-post de-duplication (`content_key` / `dedupe`),
+  and an AI near-duplicate pass (`resolve_duplicates_with_ai`, cached by cluster).
 - `inbound.py`, `owa.py` — optional mailbox access and message normalisation.
 - `drive.py`, `drive_push.py`, `drive_dedupe.py` — optional Google Drive indexing, relay,
   and duplicate handling.
@@ -55,12 +57,15 @@ and browser profiles are deliberately outside this map and are ignored by Git.
 - `research.py`, `research_run.py` — research backend setup and provider execution.
 - `ureca.py` — URECA proposal drafting and validation.
 - `profile.py` — user-supplied research profile storage.
+- `faculty_db.py` — public faculty-interest catalogue matching.
 - `saved_topics.py` — locally saved research topics.
 - `triage.py`, `triage_run.py`, `triage_store.py` — optional inbox classification, runner,
   and local triage state.
 
 ## Data and static assets
 
+- `intuition/data/faculty.json` — public faculty-interest catalogue snapshot.
+- `intuition/data/faculty_official_sources.json` — source metadata for that catalogue.
 - `intuition/static/dashboard.html` — dashboard shell, empty-state markup, and browser logic.
 - `intuition/static/vendor/` — vendored browser libraries used by the dashboard.
 - `packaging/JARVIS.ico` and `packaging/JARVIS-theme.png` — package artwork.

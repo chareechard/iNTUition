@@ -12,7 +12,12 @@ Deliberately built on the standard library so the tool keeps its three runtime
 dependencies. It binds to loopback only - the session token never leaves the machine.
 """
 import argparse
+import base64
+import binascii
+import difflib
 import hashlib
+import hmac
+import html
 import json
 import mimetypes
 import os
@@ -22,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from intuition import auth
@@ -37,6 +42,8 @@ from intuition.api import (
     get_recorded_lecture_download_link,
 )
 from intuition import drive
+from intuition import grading as grading_mod
+from intuition import solution_pairs as solution_pairs_mod
 from intuition import transcribe as transcribe_mod
 from intuition.contentcache import ContentCache
 from intuition.ledger import Ledger
@@ -56,11 +63,12 @@ from intuition import lab as lab_mod
 from intuition import lab_analysis as lab_analysis_mod
 from intuition import ureca as ureca_mod
 from intuition import profile as profile_mod
+from intuition import faculty_db
 from intuition import saved_topics as saved_topics_mod
+from intuition import focus as focus_mod
 from intuition.chat_memory import ChatMemory
 from intuition.notes import Notebook, NoteConflict, html_to_text
-from intuition.sync import (
-    DOWNLOADABLE, PUSHABLE, build_plan, recover_restructured, summarize)
+from intuition.sync import PUSHABLE, build_plan, recover_restructured, summarize
 from intuition.utils import bounded_filename, download, get_filename_from_url
 
 DEFAULT_PORT = 8384
@@ -74,6 +82,79 @@ ANNOUNCEMENT_SYNC_HOURS = (7, 23)
 INBOUND_POLL_SECONDS = 12 * 60 * 60
 DRIVE_LEARNING_SYSTEM = """You are FRIDAY, a careful university learning assistant. Answer from the supplied course material. Explain concepts clearly and distinguish what the material states from your own explanation. If the material does not support the answer, say so instead of inventing details. Default to a focused answer under 450 words with at most one worked example; expand only when the student explicitly requests depth. Compare the concepts the student actually names and correct a misleading premise tactfully. Allowed output is explanatory Markdown with headings, lists, compact tables, short quotations, code blocks, equations, worked examples, summaries, flashcards, and revision questions. Use blank lines around headings, quotations, lists, tables, and display equations. Write inline mathematics as \\( ... \\) and display mathematics as \\[ ... \\]; do not use dollar-sign delimiters. Never claim to modify files, submit coursework, browse private systems, or execute actions; you only return learning content."""
 
+# The system prompt above explicitly invites the model past its ~450-word default
+# ("expand only when the student explicitly requests depth" - tables, several worked
+# examples, flashcards, revision questions), but the old 900-token budget was sized
+# only for the default case and gave those expanded answers nowhere to go, cutting
+# them off mid-sentence with no visible error. What the OpenAI-style (OmniRoute) and
+# Anthropic-native completion paths each call the "the response was cut off by
+# max_tokens, not because it was finished" signal - see summary.py's own copy of
+# this set for the same reasoning applied to Compendium.
+FRIDAY_MAX_TOKENS = 2000
+_FRIDAY_TRUNCATED_FINISH_REASONS = ("length", "max_tokens")
+
+LEARNING_SNAPSHOT_MAX_CHARS = 3_000_000
+LEARNING_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024
+LEARNING_SNAPSHOT_PREFIXES = {
+    "data:image/jpeg;base64,": b"\xff\xd8\xff",
+    "data:image/png;base64,": b"\x89PNG\r\n\x1a\n",
+}
+
+
+def validate_learning_snapshot(value: Any) -> str:
+    """Validate the bounded data URL accepted by the FRIDAY vision route."""
+    snapshot = str(value or "")
+    if not snapshot:
+        return ""
+    prefix = next((candidate for candidate in LEARNING_SNAPSHOT_PREFIXES
+                   if snapshot.startswith(candidate)), None)
+    if prefix is None or len(snapshot) > LEARNING_SNAPSHOT_MAX_CHARS:
+        raise ValueError("snapshot must be a valid PNG or JPEG under 2 MB")
+    try:
+        image_bytes = base64.b64decode(snapshot[len(prefix):], validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("snapshot must be a valid PNG or JPEG under 2 MB") from None
+    if (not image_bytes or len(image_bytes) > LEARNING_SNAPSHOT_MAX_BYTES
+            or not image_bytes.startswith(LEARNING_SNAPSHOT_PREFIXES[prefix])):
+        raise ValueError("snapshot must be a valid PNG or JPEG under 2 MB")
+    return snapshot
+
+
+GRADE_UPLOAD_MAX_CHARS = 12_000_000
+GRADE_UPLOAD_MAX_BYTES = 8 * 1024 * 1024
+# A worked tutorial can be a text-based PDF export (grading.py extracts it with
+# drive.extract_learning_text) or a photo of handwritten pages (sent to the
+# scholar tier as a vision input instead) - the same two paths Ask FRIDAY's
+# snapshot route and Compendium's PDF extraction already prove out separately.
+GRADE_UPLOAD_PREFIXES = {
+    "data:application/pdf;base64,": (b"%PDF", ".pdf"),
+    "data:image/jpeg;base64,": (b"\xff\xd8\xff", ".jpg"),
+    "data:image/png;base64,": (b"\x89PNG\r\n\x1a\n", ".png"),
+}
+
+
+def validate_grade_upload(value: Any) -> Tuple[bytes, str]:
+    """Validate the bounded data URL a worked-tutorial upload arrives as.
+
+    Returns ``(raw_bytes, extension)`` - the extension lets the caller stage a
+    temp file with the right suffix so grading.extract_work_content can dispatch
+    on it exactly like any other file on disk.
+    """
+    data_url = str(value or "")
+    prefix = next((candidate for candidate in GRADE_UPLOAD_PREFIXES
+                   if data_url.startswith(candidate)), None)
+    if not data_url or prefix is None or len(data_url) > GRADE_UPLOAD_MAX_CHARS:
+        raise ValueError("upload must be a PDF, PNG or JPEG under 8 MB")
+    try:
+        raw_bytes = base64.b64decode(data_url[len(prefix):], validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("upload must be a PDF, PNG or JPEG under 8 MB") from None
+    magic, extension = GRADE_UPLOAD_PREFIXES[prefix]
+    if (not raw_bytes or len(raw_bytes) > GRADE_UPLOAD_MAX_BYTES
+            or not raw_bytes.startswith(magic)):
+        raise ValueError("upload must be a PDF, PNG or JPEG under 8 MB")
+    return raw_bytes, extension
+
 
 # lab_analysis.py validates every field below before it reaches the page - a
 # tighter prompt just means less for that validator to have to reject. The
@@ -81,13 +162,32 @@ DRIVE_LEARNING_SYSTEM = """You are FRIDAY, a careful university learning assista
 # "initialState" alone can only paint one static picture, not drive the
 # Simulation tab's Play/Step/Speed timeline, so the model additionally
 # mentally traces its own execution into a short operation log.
-LAB_BLUEPRINT_SYSTEM = """You are FRIDAY, reading one source file open in a student's local Python/Java IDE. Identify the primary algorithm it implements and respond with strict JSON only - no prose, no markdown fences, no explanation. Schema: {"detectedAlgorithm": "<name, e.g. Dijkstra's Shortest Path, QuickSort, Bubble Sort, Binary Search - or \\"Not identified\\" if the file implements no recognizable algorithm>", "paradigm": "<e.g. Greedy, Divide and Conquer, Dynamic Programming, Brute Force, Backtracking - or \\"Unknown\\">", "timeComplexity": "<Big-O in terms of the code's own variable names, e.g. O(N log N) - or \\"Unknown\\">", "spaceComplexity": "<Big-O - or \\"Unknown\\">", "criticalLines": [{"line": <1-based line number from the numbered source below>, "purpose": "<short explanation of that line's operational importance>"}] (at most 8, only the lines that matter most - never invent a line number outside the file), "simulationModel": {"type": "\\"array\\", \\"graph\\", \\"tree\\" or \\"none\\"", "initialState": <for "array": the JSON array of starting values the code operates on; for "graph"/"tree": {"nodes": [...], "edges": [{"from":..., "to":..., "weight":...}]}; use null with type "none" if nothing in the file has a structure worth animating>}, "steps": [<at most 60 steps tracing the algorithm's own execution against simulationModel.initialState, each either {"op":"compare","indices":[i,j],"line":<n>}, {"op":"swap","indices":[i,j],"line":<n>}, {"op":"set","indices":[i],"value":<v>,"line":<n>}, {"op":"visit","node":"<id>","line":<n>}, or {"op":"edge","from":"<id>","to":"<id>","weight":<w>,"line":<n>} - omit "steps" entirely (or leave it empty) if simulationModel.type is "none" or you cannot trace real execution>]}. Base every field only on what the code in front of you actually does; never invent an algorithm, complexity, or step the code does not support."""
+LAB_BLUEPRINT_SYSTEM = """You are FRIDAY, reading one source file open in a student's local Python/Java/C IDE. Identify the primary algorithm it implements and respond with strict JSON only - no prose, no markdown fences, no explanation. Schema: {"detectedAlgorithm": "<name, e.g. Dijkstra's Shortest Path, QuickSort, Bubble Sort, Binary Search - or \\"Not identified\\" if the file implements no recognizable algorithm>", "paradigm": "<e.g. Greedy, Divide and Conquer, Dynamic Programming, Brute Force, Backtracking - or \\"Unknown\\">", "timeComplexity": "<Big-O in terms of the code's own variable names, e.g. O(N log N) - or \\"Unknown\\">", "spaceComplexity": "<Big-O - or \\"Unknown\\">", "criticalLines": [{"line": <1-based line number from the numbered source below>, "purpose": "<short explanation of that line's operational importance>"}] (at most 8, only the lines that matter most - never invent a line number outside the file), "simulationModel": {"type": "\\"array\\", \\"graph\\", \\"tree\\" or \\"none\\"", "initialState": <for "array": the JSON array of starting values the code operates on; for "graph"/"tree": {"nodes": [...], "edges": [{"from":..., "to":..., "weight":...}]}; use null with type "none" if nothing in the file has a structure worth animating>}, "steps": [<at most 60 steps tracing the algorithm's own execution against simulationModel.initialState, each either {"op":"compare","indices":[i,j],"line":<n>}, {"op":"swap","indices":[i,j],"line":<n>}, {"op":"set","indices":[i],"value":<v>,"line":<n>}, {"op":"visit","node":"<id>","line":<n>}, or {"op":"edge","from":"<id>","to":"<id>","weight":<w>,"line":<n>} - omit "steps" entirely (or leave it empty) if simulationModel.type is "none" or you cannot trace real execution>]}. Base every field only on what the code in front of you actually does; never invent an algorithm, complexity, or step the code does not support."""
 
 # The model is not allowed to silently turn a guessed trace into a different
 # algorithm: array indices are zero-based, and a dynamic/unknown input means
 # no simulation rather than an invented static example. lab_analysis validates
 # this contract before the canvas sees the response.
 LAB_BLUEPRINT_SYSTEM += """ Use the complete numbered source, including helper functions and the entry point. For simulationModel.type "array", initialState must be a literal array the source actually creates, and every indices value is zero-based and must refer to that array. Only emit a step when that operation really occurs in the shown execution; do not fabricate a canonical textbook trace. If inputs are read from stdin, generated randomly, or otherwise cannot be known from the source, use type "none". For graph/tree steps, only reference nodes and edges present in initialState. If you cannot trace the concrete execution confidently, leave steps empty."""
+
+# Replaces the old hardwired Java Coach curriculum (a fixed 8-stage lesson ladder with
+# regex "structure checks") with a live chat grounded in the student's actual code and
+# actual run output, instead of the same canned lessons for everyone.
+LAB_COACH_SYSTEM = """You are FRIDAY, a live coding coach sitting beside a student's local Python/Java/C IDE (the Software Lab). You see the exact numbered source of the file they have open and, when available, the tail of their most recent Run's console output (stdout/stderr/compiler errors). Answer only from what is actually in front of you - the shown source and run output - never invent code, output, or errors that are not there. Keep answers short and concrete: 2-5 sentences for a direct question, 1-3 sentences for an unprompted live observation. When asked to explain, explain what the code actually does, in the order it executes. When asked what happens next or what to write next, recommend one concrete, small next step grounded in the code's current state, not a full rewritten solution - the student is learning to write it themselves. When the run output shows a compiler or runtime error, explain what it means and point at the specific line responsible. For an unprompted observation you will be told which lines are new or changed since you last looked, or that nothing changed - stay strictly on that delta and never re-explain or repeat feedback on lines you have already covered in the recent conversation below. Use Markdown; put inline mathematics inside \\( ... \\) and display mathematics inside \\[ ... \\] if any is needed."""
+
+
+def _changed_line_ranges(old_text: str, new_text: str) -> str:
+    """Line ranges in new_text that differ from old_text, e.g. "3-5, 9".
+
+    Lets the Lab Coach's unprompted commentary (mode "live"/"run") point at what
+    actually changed since it last looked, instead of re-reading - and re-explaining -
+    lines it has already covered.
+    """
+    matcher = difflib.SequenceMatcher(
+        a=old_text.splitlines(), b=new_text.splitlines(), autojunk=False)
+    ranges = [(j1 + 1, j2) for tag, _i1, _i2, j1, j2 in matcher.get_opcodes()
+              if tag != "equal" and j2 > j1]
+    return ", ".join(str(a) if a == b else "{}-{}".format(a, b) for a, b in ranges)
 
 # ureca.py validates every field below before it reaches the store - draft
 # text is a starting point for the student to edit, never a finished
@@ -97,18 +197,122 @@ LAB_BLUEPRINT_SYSTEM += """ Use the complete numbered source, including helper f
 # reformat, so it gets the slower, stronger rung and a longer deadline.
 URECA_DRAFT_SYSTEM = """You are doing autonomous research for an NTU undergraduate who gave you a one-line idea and needs a first-draft URECA (Undergraduate Research Experience on CAmpus) project proposal. URECA is NTU's self-proposed undergraduate research programme: a student drafts a proposal, a faculty supervisor accepts and registers it, and the student spends the August-to-June academic year on the project, finishing with an abstract, a poster and a final paper; consumable spending is capped at $500. Think like a researcher scoping a feasible undergraduate project, not a copywriter padding out a summary: reason about what makes this idea tractable in about 11 months, what a realistic method looks like, and what could plausibly go wrong or be out of scope. Respond with strict JSON only - no prose, no markdown fences, no explanation. Schema: {"background": "<2-4 sentences: the problem or gap and why it matters, grounded only in what the student described>", "objectives": "<2-4 concrete, checkable research objectives, written as short sentences>", "methodology": "<3-5 sentences: a specific, realistic approach an undergraduate could carry out over about 11 months - name concrete methods, tools or data sources where you can>", "outcomes": "<2-3 sentences: the expected contribution, tied to URECA's own deliverables of an abstract, poster and final paper>", "budgetNotes": "<1-3 sentences: what consumables or small costs this plausibly needs, staying within the $500 cap - say \\"No consumables anticipated\\" if none>", "timelineNotes": "<2-4 sentences: a rough month-by-month or phase-by-phase plan spanning August to June>"}. Write a first draft the student can edit, not a finished document - stay concrete, and never invent citations, data, prior results, or specifics the student did not mention. It is fine, and expected, to reason from general domain knowledge about feasibility and method - that is the research; just do not fabricate sources or claim specific prior findings you cannot support."""
 
-# The first, cheap step of the Research tab's autonomous flow: propose a short
-# list of candidate topics before any deep research runs. The student still
-# picks one explicitly (see /api/research action=suggest and the "Research
-# this" cards in the UI) - this only replaces having to type a title and a
-# one-line idea by hand, not the explicit press itself.
-RESEARCH_SUGGEST_ATTEMPTS = 2
 # Research suggestions must be driven by the profile supplied in the Research tab.
 # No programme, year, department, course history, or supervisor preference is
 # assumed when a new user installs the project.
 RESEARCH_SUGGEST_ATTEMPTS = 2
-RESEARCH_SUGGEST_SYSTEM = """You propose URECA (Undergraduate Research Experience on CAmpus) project ideas for an undergraduate, tailored only to the programme, year, field of study, and interests supplied in the user's research profile. URECA is NTU's self-proposed undergraduate research programme: a student drafts a proposal, a faculty supervisor accepts and registers it, and the student spends the August-to-June academic year on the project, finishing with an abstract, a poster and a final paper; consumable spending is capped at $500. Do not assume a specific programme, year, department, course list, prior knowledge, or research experience. If the profile is incomplete, keep ideas accessible and state what background would need to be learned. Propose ideas that pose a non-trivial, answerable research question and combine at least two skills such as proof and counterexample, mathematical modelling, algorithm design and complexity analysis, numerical implementation, or experimental evaluation. Make the challenge visible in the topic sentence through a concrete method, comparison, conjecture, or measurable criterion - not through buzzwords or an oversized application. Scope each project so the student can learn missing background, build a defensible baseline, investigate one focused extension, and produce a meaningful result in about 11 months; a good idea should be demanding but finishable, not a survey, a generic app, a toy coding exercise, training a large model from scratch, or an open-ended attempt at a famous unsolved problem. If the student supplied interests or keywords, use them as the anchor for every idea - each one should visibly grow out of a stated interest, and none should drift onto an unrelated theme. Aim for a spread across the theory-to-application range while keeping every idea within the supplied level and field. Use concrete methods and domain terms so each idea is actionable and easy for the student to evaluate; never invent or name a supervisor. Respond with strict JSON only - no prose, no markdown fences, no explanation. Schema: a JSON array of 3 to 5 objects, each {"title": "<a short, concrete project title, under 12 words>", "topic": "<one sentence pitching the idea, specific enough to hand straight to a research pass - not a vague theme>"}. Make the ideas genuinely different from each other in approach or subfield. Never invent a specific supervisor, dataset, or prior result; keep each idea grounded in the student's stated profile."""
+RESEARCH_SUGGEST_SYSTEM = """You propose URECA (Undergraduate Research Experience on CAmpus) project ideas for an undergraduate, tailored only to the programme, year, field of study, and interests supplied in the user's research profile. URECA is NTU's self-proposed undergraduate research programme: a student drafts a proposal, a faculty supervisor accepts and registers it, and the student spends the August-to-June academic year on the project, finishing with an abstract, a poster and a final paper; consumable spending is capped at $500. Do not assume a specific programme, year, department, course list, prior knowledge, or research experience. If the profile is incomplete, keep ideas accessible and state what background would need to be learned. Propose ideas that pose a non-trivial, answerable research question and combine at least two skills such as proof and counterexample, mathematical modelling, algorithm design and complexity analysis, numerical implementation, or experimental evaluation. Make the challenge visible in the topic sentence through a concrete method, comparison, conjecture, or measurable criterion - not through buzzwords or an oversized application. Scope each project so the student can learn missing background, build a defensible baseline, investigate one focused extension, and produce a meaningful result in about 11 months; a good idea should be demanding but finishable, not a survey, a generic app, a toy coding exercise, training a large model from scratch, or an open-ended attempt at a famous unsolved problem. If the student supplied interests or keywords, use them as the anchor for every idea - each one should visibly grow out of a stated interest, and none should drift onto an unrelated theme. Aim for a spread across the theory-to-application range while keeping every idea within the supplied level and field. Use concrete methods and domain terms so each idea can be matched against the local faculty catalogue; never invent or name a supervisor unless one is supplied to you below as the target supervisor. If a target supervisor is supplied, with their own stated research interests, every idea must sit squarely inside that field and direction - reuse their own terms and methods, extend or apply their actual research rather than a generic idea decorated with their keywords, and write each idea so it would read to them as recognizably their kind of work. This is to maximise the realistic chance that supervisor would accept and register the proposal, so do not drift onto an adjacent-sounding but different subfield just for variety; the required spread across the theory-to-application range still applies within their field. Respond with strict JSON only - no prose, no markdown fences, no explanation. Schema: a JSON array of 8 to 10 objects, each {"title": "<a short, concrete project title, under 12 words>", "topic": "<one sentence pitching the idea, specific enough to hand straight to a research pass - not a vague theme>"}. Make the ideas genuinely different from each other in approach or subfield, and do not pad the list with near-duplicates to reach the count - if the profile only genuinely supports fewer strong ideas, return fewer. Never invent a specific supervisor, dataset, or prior result; keep each idea grounded in the student's stated profile."""
 OMNIROUTE_WATCH_SECONDS = 15
+
+
+def research_suggest_prompt(state: "State", keywords: str,
+                            professor: Optional[Dict] = None) -> str:
+    """Build one reproducible prompt before the slow provider call starts.
+
+    ``professor`` - when the student picked one from the faculty catalogue
+    dropdown - is a public faculty_db record, so its research interests come
+    from the same audited, provenance-tagged source as everything else the
+    Research tab shows; nothing here is invented on the fly. Keywords and a
+    professor are independent inputs: either, both, or neither may be set.
+    """
+    prompt = "Student profile: {}".format(state.profile.summary())
+    codes = course_codes(state)
+    if codes:
+        prompt += "\nCourses this semester: {}".format(", ".join(codes))
+    if keywords:
+        prompt += "\nInterests / keywords to anchor ideas in: {}".format(keywords)
+    if professor:
+        prompt += "\nTarget supervisor: {} ({}, {}).".format(
+            professor.get("name", ""), professor.get("title", ""),
+            professor.get("school", ""))
+        interests = professor.get("research_interests") or []
+        if interests:
+            prompt += "\nTheir stated research interests: {}.".format(
+                "; ".join(interests))
+        summary = (professor.get("profile_summary") or "").strip()
+        if summary:
+            prompt += "\nTheir profile summary: {}".format(summary[:600])
+    return prompt + "\n---\nReport the JSON array of proposed ideas now."
+
+
+def research_tab_backend(state: "State") -> Optional[str]:
+    """Backend for the Research tab's scholar-tier passes (topic suggestions and
+    the autonomous proposal draft).
+
+    These are quality-first calls, so they are pinned to Claude Opus directly -
+    the signed-in Claude CLI, or an Anthropic API key - rather than being left to
+    route through the free OmniRoute tier. A backend the user has explicitly
+    chosen still wins; the direct Claude route is only given up when neither the
+    CLI login nor an API key is available, and then OmniRoute (which itself walks
+    the scholar ladder to claude-opus-5) is the last resort.
+    """
+    if state.research_backend:
+        return state.research_backend
+    return research_mod.resolve_claude_backend() or research_mod.BACKEND_OMNIROUTE
+
+
+def generate_research_suggestions(state: "State", prompt: str, keywords: str,
+                                  professor: Optional[Dict] = None) -> Dict:
+    """Run the provider pass and return the complete UI payload.
+
+    A malformed answer is cheap to retry, but a provider failure is not: the
+    scholar tier can have a minutes-long deadline, so retrying it would make one
+    user action needlessly occupy two long-running workers.
+    """
+    suggestions, result, last_error = [], None, None
+    for _attempt in range(RESEARCH_SUGGEST_ATTEMPTS):
+        try:
+            result = ai_provider.complete_tier(
+                "scholar", prompt, RESEARCH_SUGGEST_SYSTEM,
+                preferred=research_tab_backend(state), max_tokens=4500,
+                download_root=state.download_root)
+        except ai_provider.ProviderError as exc:
+            last_error = exc
+            result = None
+            break
+        suggestions = ureca_mod.parse_suggest_response(result.get("text") or "")
+        if suggestions:
+            break
+    if result is None:
+        raise ai_provider.ProviderError(str(last_error or "No research suggestions returned"))
+    if professor:
+        # The chosen professor is a guaranteed lead for every idea (that is
+        # the point of picking them), with any other catalogue overlap
+        # surfaced alongside it rather than hidden.
+        faculty_matches = []
+        for item in suggestions:
+            others = [m for m in faculty_db.match_topic(
+                          item.get("title", ""), item.get("topic", ""), keywords)
+                      if m.get("id") != professor.get("id")]
+            faculty_matches.append([professor] + others[:2])
+    else:
+        faculty_matches = faculty_db.match_suggestions(suggestions, keywords)
+    return {
+        "suggestions": suggestions,
+        "faculty_matches": faculty_matches,
+        "faculty_catalogue": faculty_db.metadata(),
+        "backend": result.get("backend"),
+        "model": result.get("model"),
+        "professor": professor,
+    }
+
+
+def do_research_suggest(state: "State", job_id: str, prompt: str, keywords: str,
+                        professor: Optional[Dict] = None):
+    """Complete one suggestion job without holding the HTTP request open."""
+    try:
+        result = generate_research_suggestions(state, prompt, keywords, professor)
+    except Exception as exc:  # noqa: BLE001 - hand the provider error to the UI
+        with state.lock:
+            job = state.research_suggest_job
+            if job and job.get("id") == job_id:
+                job.update({"status": "error", "done": True, "error": str(exc)})
+        state.note("Research topic suggestions failed: {}".format(exc))
+        return
+    with state.lock:
+        job = state.research_suggest_job
+        if job and job.get("id") == job_id:
+            job.update({"status": "complete", "done": True, **result})
 
 TODO_BACKENDS = ("auto", research_mod.BACKEND_OMNIROUTE, research_mod.BACKEND_CLI)
 TODO_MODEL_OPTIONS = {
@@ -156,7 +360,10 @@ def todo_ai_choice(requested: str = "auto"):
 def todo_model_options():
     """Add OmniRoute's live automatic routes beneath the Auto model choice."""
     options = {backend: list(rows) for backend, rows in TODO_MODEL_OPTIONS.items()}
-    routes = [model for model in omniroute_provider.models()
+    # Called from snapshot() on every /api/state poll: keep the probe short and
+    # lean on models()' own result/failure caching so a slow gateway cannot stall
+    # the HUD. A cold cache pays this once, then the backoff takes over.
+    routes = [model for model in omniroute_provider.models(timeout=4.0)
               if model.startswith("auto/")]
     options["auto"].extend(
         (model, "Auto · " + model[5:].replace("-", " ").replace(":", " · ").title())
@@ -172,25 +379,40 @@ class State:
                  scope: str = api_mod.SCOPE_SEMESTER,
                  transcribe_model: str = transcribe_mod.DEFAULT_MODEL,
                  inbound_db: Optional[str] = None):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        # The dashboard is loopback-bound, but loopback is not an authorization
+        # boundary: another local process can still issue POST/PUT requests.
+        # The browser receives this secret as a SameSite cookie from "/".
+        self.local_secret = uuid.uuid4().hex + uuid.uuid4().hex
         self.download_root = download_root
         self.prefer_rest = prefer_rest
         self.scope = scope
         self.transcribe_model = transcribe_model
         self.transcribing = False
-        self.transcribe_progress = {"done": 0, "total": 0, "current": "", "pct": 0}
-        self._transcriber = None
+        self.transcribe_progress: Dict[str, Any] = {
+            "done": 0, "total": 0, "current": "", "pct": 0
+        }
+        self._transcriber: Optional[transcribe_mod.Transcriber] = None
         # One Compendium generation at a time, like transcribing/pushing - a 60-120s
         # job with its own worker thread. summary_job holds the single most recent
         # job's live status; the job id lets a poll from a stale tab notice it is
         # looking at an older run rather than silently showing the wrong one.
         self.summarizing = False
-        self.summary_job: Optional[Dict] = None
+        self.summary_job: Optional[Dict[str, Any]] = None
+        # Same one-job-at-a-time, most-recent-status shape as summary_job, for
+        # grading a student's uploaded worked tutorial against its solution_pairs
+        # match. See do_grade_tutorial.
+        self.grading = False
+        self.grading_job: Optional[Dict[str, Any]] = None
         self.media_survey: List[Dict] = []
         self.identity: Optional[Dict] = None
         self.drive_folder = drive_folder
         self.move = move
         self.token: Optional[str] = auth.load_token()
+        # Incremented whenever a token is installed so late worker results cannot
+        # overwrite state belonging to a newer browser session.
+        self.session_generation = 1
+        self.session_rejected = False
         self.courses: List[Dict] = []
         self.plan: List[Dict] = []
         self.skipped: List[str] = []
@@ -199,12 +421,32 @@ class State:
         self.downloading = False
         self.pushing = False
         self.drive_listing = False
+        # OAuth consent flow (dashboard "Connect Google Drive" button) in flight.
+        self.drive_linking = False
+        self.drive_link_error = ""
         self.pulling = False
         self.drive_files: List[Dict] = []
-        self.pull_progress = {"done": 0, "total": 0, "current": "", "pct": 0}
+        # Docs found by "Search my Drive" (outside the app's own mirrored tree),
+        # keyed by id. do_drive_list's inventory refresh replaces drive_files
+        # wholesale, so these are kept separately and re-merged in every time -
+        # otherwise the next background "Index" run would silently drop them.
+        self.external_drive_files: Dict[str, Dict] = {}
+        # snapshot() derives two O(n) views from the inventory (transcribable
+        # media, practice/solution pairs) on every ~1.2s /api/state poll. The
+        # inventory is only ever replaced wholesale (never mutated in place), so
+        # these are memoised against the exact list object and only recomputed
+        # when an "Index"/pull/search actually swaps in a new one.
+        self._drive_view_cache: Dict[str, Any] = {}
+        self.pull_progress: Dict[str, Any] = {
+            "done": 0, "total": 0, "current": "", "pct": 0
+        }
         self.log: List[str] = []
-        self.progress = {"done": 0, "total": 0, "current": "", "bytes": 0}
-        self.push_progress = {"done": 0, "total": 0, "current": "", "pct": 0}
+        self.progress: Dict[str, Any] = {
+            "done": 0, "total": 0, "current": "", "bytes": 0, "pct": 0
+        }
+        self.push_progress: Dict[str, Any] = {
+            "done": 0, "total": 0, "current": "", "pct": 0
+        }
         self.ledger = Ledger(download_root)
         self.cache = ContentCache(download_root)
         self.schedule = schedule_mod.Schedule(download_root)
@@ -214,11 +456,16 @@ class State:
         self.announcements = announcements_mod.Feed(download_root)
         self.chat_memory = ChatMemory(download_root)
         self.notebook = Notebook(download_root)
-        self.lab_workspace = lab_mod.Workspace(download_root)
+        self.lab_repos = lab_mod.LabRepos(download_root)
         self.lab_jobs = lab_mod.JobManager()
         self.ureca = ureca_mod.Store(download_root)
         self.profile = profile_mod.Store(download_root)
         self.saved_topics = saved_topics_mod.Store(download_root)
+        self.focus = focus_mod.Store(download_root)
+        # Research suggestions use the same background-job handoff as long
+        # Compendium generations: the scholar provider can exceed the browser's
+        # normal 20-second request deadline.
+        self.research_suggest_job: Optional[Dict[str, Any]] = None
         self.announcements_syncing = False
         self.unified_syncing = False
         self.unified_sync_error = ""
@@ -239,6 +486,59 @@ class State:
         self.semester_key = semester_mod.format_semester(
             semester_mod.current_semester())
 
+    def session_snapshot(self):
+        """Return the token and generation atomically for a background pipeline."""
+        with self.lock:
+            return self.token, self.session_generation
+
+    def install_token(self, token: str):
+        """Install a fresh browser session and clear state owned by the old one."""
+        with self.lock:
+            self.token = token
+            self.session_generation += 1
+            self.session_rejected = False
+            self.identity = None
+            self.courses = []
+            self.plan = []
+            self.skipped = []
+            self.scan_errors = []
+            self.unified_sync_error = ""
+            self.unified_syncing = False
+            self.scanning = False
+            self.downloading = False
+            self.progress = {
+                "done": 0, "total": 0, "current": "", "bytes": 0, "pct": 0
+            }
+            self.announcements_syncing = False
+            self.announcement_errors = []
+            self.announcement_schedule_error = ""
+            self.announcement_summary_error = ""
+            self.inbound_error = ""
+            return self.session_generation
+
+    def session_current(self, token: str, generation: int) -> bool:
+        with self.lock:
+            return (self.token == token
+                    and self.session_generation == generation
+                    and not self.session_rejected)
+
+    def reject_session(self, token: str, generation: int, message: str) -> bool:
+        """Stop the current Blackboard pipelines after a confirmed 401."""
+        with self.lock:
+            if self.token != token or self.session_generation != generation:
+                return False
+            self.session_rejected = True
+            self.session_generation += 1
+            self.identity = None
+            self.courses = []
+            self.plan = []
+            self.skipped = []
+            self.scan_errors = []
+            self.announcement_errors = []
+            self.unified_sync_error = message
+            self.unified_syncing = False
+            self.announcements_syncing = False
+            return True
     def rebind_root(self, download_root: str):
         """Point every root-anchored store at a new download folder.
 
@@ -261,10 +561,11 @@ class State:
             self.announcements = announcements_mod.Feed(root)
             self.chat_memory = ChatMemory(root)
             self.notebook = Notebook(root)
-            self.lab_workspace = lab_mod.Workspace(root)
+            self.lab_repos = lab_mod.LabRepos(root)
             self.ureca = ureca_mod.Store(root)
             self.profile = profile_mod.Store(root)
             self.saved_topics = saved_topics_mod.Store(root)
+            self.focus = focus_mod.Store(root)
             # The plan describes files under the previous root; it means nothing here.
             self.plan = []
             self.media_survey = []
@@ -285,6 +586,8 @@ class State:
         if semester:
             for number in range(1, cal_mod.TOTAL_TEACHING_WEEKS + 1):
                 week_monday = semester.monday_of(number)
+                if week_monday is None:
+                    continue
                 teaching_weeks.append({
                     "week": number,
                     "monday": week_monday.isoformat(),
@@ -317,19 +620,23 @@ class State:
             "clock": now.strftime("%H:%M:%S"),
         }
 
-    def refresh_identity(self):
-        """Look up who the session belongs to. Cached: it never changes mid-session."""
-        if not self.token:
+    def refresh_identity(self, token: Optional[str] = None, generation: Optional[int] = None):
+        """Look up identity without allowing an old worker to clobber a new session."""
+        if token is None or generation is None:
+            token, generation = self.session_snapshot()
+        if not token:
             with self.lock:
-                self.identity = None
+                if self.session_generation == generation:
+                    self.identity = None
             return None
         try:
             from intuition import rest
-            who = rest.get_me(self.token)
+            who = rest.get_me(token)
         except Exception:  # noqa: BLE001 - identity is cosmetic, never block on it
             who = None
         with self.lock:
-            self.identity = who
+            if self.token == token and self.session_generation == generation:
+                self.identity = who
         return who
 
     def refresh_media(self):
@@ -346,13 +653,50 @@ class State:
             del self.log[:-200]
 
     def snapshot(self) -> Dict:
+        # Provider probes can touch local gateways or CLI processes. Resolve them
+        # outside the state lock so /api/token and the other controls stay responsive.
+        ai_status = ai_provider.status(self.research_backend)
+        _todo_backend, todo_ai_status = todo_ai_choice()
+        # Schedule reload/expansion reads disk and resolves every teaching week.
+        # Do it before taking the state lock so a slow calendar or a large schedule
+        # cannot stall token installation and worker progress updates.
+        schedule_snapshot = self._schedule_snapshot()
+        # The Drive-derived views are O(n) over the whole cached inventory, and
+        # the announcement / inbound / todo snapshots each touch disk or a SQLite
+        # file. snapshot() serves /api/state, which the dashboard polls every
+        # 1.2s, so holding self.lock through this much work starves the one-shot
+        # lock acquisition on other endpoints - a large Drive index was pushing
+        # /api/drive/tree past its 20s client timeout while it waited behind a
+        # run of these polls. Compute everything that does not need self.lock
+        # up front - grabbing only the current inventory list, which is always
+        # swapped in wholesale and never mutated in place - then hold the lock
+        # just long enough to read the plain state fields.
+        with self.lock:
+            drive_files = self.drive_files
+        drive_file_count = len(drive_files)
+        cache = self._drive_view_cache
+        if cache.get("src") is not drive_files:
+            cache = {
+                "src": drive_files,
+                "media": transcribe_mod.classify_drive_media(drive_files),
+                "pairs": solution_pairs_mod.pair_practice_with_solutions(drive_files),
+            }
+            self._drive_view_cache = cache
+        drive_media = self.media_survey + cache["media"]
+        drive_solution_pairs = cache["pairs"]
+        announcements_snapshot = self.announcements.snapshot()
+        inbound_snapshot = inbound_mod.snapshot(
+            inbound_mod.resolve_path(self.download_root, self.inbound_db))
+        todo_snapshot = self.todo.snapshot()
+        focus_snapshot = self.focus.snapshot()
+        todo_model_opts = {backend: [{"value": value, "label": label}
+                                    for value, label in options]
+                           for backend, options in todo_model_options().items()}
         with self.lock:
             token_expiry = None
             if self.token:
                 expires = auth.expires_at(self.token)
                 token_expiry = expires
-            ai_status = ai_provider.status(self.research_backend)
-            _todo_backend, todo_ai_status = todo_ai_choice()
             return {
                 "download_root": self.download_root,
                 # Which copy of the page is this? A frozen build serves the
@@ -363,6 +707,7 @@ class State:
                 "semester": semester_mod.format_semester(
                     semester_mod.current_semester()),
                 "has_token": bool(self.token),
+                "session_rejected": self.session_rejected,
                 "identity": self.identity,
                 "token_expires": token_expiry,
                 "courses": self.courses,
@@ -380,15 +725,16 @@ class State:
                 "transcribe_progress": dict(self.transcribe_progress),
                 "summarizing": self.summarizing,
                 "summary_job": dict(self.summary_job) if self.summary_job else None,
+                "grading": self.grading,
+                "grading_job": dict(self.grading_job) if self.grading_job else None,
                 "transcribe": {
                     "model": self.transcribe_model,
                     # Local survey plus whatever the already-cached Drive index
                     # (self.drive_files, refreshed by "Index"/do_drive_list) turns
                     # out to hold - move mode deletes a video locally once it is
-                    # archived, so that is the only place left to detect it. Pure
-                    # in-memory classification, no extra Drive calls on every poll.
-                    "media": self.media_survey
-                             + transcribe_mod.classify_drive_media(self.drive_files),
+                    # archived, so that is the only place left to detect it.
+                    # Classified above, outside the lock.
+                    "media": drive_media,
                 },
                 "progress": dict(self.progress),
                 "push_progress": dict(self.push_progress),
@@ -398,36 +744,52 @@ class State:
                     "move": self.move,
                     "configured": drive.credentials_present(),
                     "linked": drive.token_present(),
+                    "linking": self.drive_linking,
+                    "link_error": self.drive_link_error,
                     "archived": len(self.ledger),
                     "listing": self.drive_listing,
-                    "file_count": len(self.drive_files),
+                    "file_count": drive_file_count,
+                    # Recomputed from the already-cached inventory above, outside
+                    # the lock - no extra Drive calls.
+                    "solution_pairs": drive_solution_pairs,
                 },
-                "schedule": self._schedule_snapshot(),
-                "announcements": dict(self.announcements.snapshot(),
+                "schedule": schedule_snapshot,
+                "announcements": dict(announcements_snapshot,
                                       syncing=self.announcements_syncing,
                                       errors=list(self.announcement_errors),
                                       summarizing=self.announcements_summarizing,
                                       summary_error=self.announcement_summary_error,
                                       schedule_error=self.announcement_schedule_error,
                                       ai=ai_status),
-                "inbound": dict(inbound_mod.snapshot(
-                    inbound_mod.resolve_path(self.download_root, self.inbound_db)),
-                    syncing=self.inbound_syncing, error=self.inbound_error),
-                "todo": dict(self.todo.snapshot(),
+                "inbound": dict(inbound_snapshot,
+                                syncing=self.inbound_syncing,
+                                error=self.inbound_error),
+                "todo": dict(todo_snapshot,
                              busy=sorted(self.todo_researching),
                              errors=dict(self.todo_research_errors),
                              ai=todo_ai_status,
-                             model_options={backend: [{"value": value, "label": label}
-                                                     for value, label in options]
-                                            for backend, options
-                                            in todo_model_options().items()},
+                             model_options=todo_model_opts,
                              backends=list(TODO_BACKENDS)),
+                "focus": focus_snapshot,
                 "log": list(self.log[-40:]),
             }
 
 
-def do_scan(state: State, course_ids: List[str]):
-    """Fetch content trees for the chosen courses and diff them against disk."""
+def _pipeline_session(state: State):
+    if hasattr(state, "session_snapshot"):
+        return state.session_snapshot()
+    return getattr(state, "token", None), 1
+
+def _pipeline_session_current(state: State, token: str, generation: int) -> bool:
+    if hasattr(state, "session_current"):
+        return state.session_current(token, generation)
+    return getattr(state, "token", None) == token
+
+def do_scan(state: State, course_ids: List[str], token: Optional[str] = None,
+            generation: Optional[int] = None):
+    """Fetch content trees while ignoring results from an older session."""
+    if token is None or generation is None:
+        token, generation = _pipeline_session(state)
     try:
         state.cache.reset_stats()
         selected = [c for c in state.courses if c["id"] in course_ids]
@@ -439,7 +801,7 @@ def do_scan(state: State, course_ids: List[str]):
             state.note("Scanning {}".format(course["name"]))
             try:
                 tree = get_download_dir(
-                    state.token,
+                    token,
                     course["name"],
                     course["id"],
                     prefer_rest=state.prefer_rest,
@@ -472,6 +834,9 @@ def do_scan(state: State, course_ids: List[str]):
                 "- not re-downloading them".format(len(recovered))
             )
 
+        if not _pipeline_session_current(state, token, generation):
+            state.note("Scan result discarded: Blackboard session changed")
+            return
         with state.lock:
             state.plan = combined
             state.skipped = skipped
@@ -490,17 +855,36 @@ def do_scan(state: State, course_ids: List[str]):
         )
     finally:
         with state.lock:
-            state.scanning = False
+            if _pipeline_session_current(state, token, generation):
+                state.scanning = False
 
 
-def do_announcement_sync(state: State):
+def do_announcement_sync(state: State, token: Optional[str] = None,
+                          generation: Optional[int] = None):
+    if token is None or generation is None:
+        token, generation = state.session_snapshot()
+    if not token or not state.session_current(token, generation):
+        return
+    with state.lock:
+        courses = list(state.courses)
     try:
-        errors = state.announcements.sync(state.token, list(state.courses))
+        errors = state.announcements.sync(token, courses)
+        if not state.session_current(token, generation):
+            return
         with state.lock:
             state.announcement_errors = errors
         state.note("Announcements synced: {} across {} course(s){}".format(
             len(state.announcements.items), len(state.courses),
             "; {} failed".format(len(errors)) if errors else ""))
+        # Fold in near-duplicates the deterministic cross-post collapse can't see
+        # (same notice re-posted with light edits). Cached by cluster fingerprint,
+        # so this only reaches the model when the feed actually changed.
+        try:
+            folded = state.announcements.resolve_duplicates_with_ai(state.research_backend)
+            if folded:
+                state.note("Announcements de-duplicated by AI: {} folded".format(folded))
+        except Exception as exc:  # never let dedupe break a good sync
+            state.note("Announcement AI de-duplication skipped: {}".format(exc))
         # Schedule extraction is a small, bounded classification job. Use the verified
         # local Claude login directly: a wedged OmniRoute can accept TCP connections
         # while never answering inference, which would double the scan latency before
@@ -560,7 +944,8 @@ def do_announcement_sync(state: State):
                 state.note("Announcement TL;DR refresh failed: {}".format(exc))
     finally:
         with state.lock:
-            state.announcements_syncing = False
+            if state.token == token and state.session_generation == generation:
+                state.announcements_syncing = False
 
 
 def seconds_until_next_announcement_sync(now: Optional[datetime] = None) -> float:
@@ -576,17 +961,30 @@ def seconds_until_next_announcement_sync(now: Optional[datetime] = None) -> floa
 
 
 def run_scheduled_announcement_sync(state: State):
-    """Refresh courses if necessary, then pull announcements from Blackboard."""
-    if not state.token:
+    """Refresh courses and announcements for one stable Blackboard session."""
+    if hasattr(state, "session_snapshot"):
+        token, generation = state.session_snapshot()
+    else:  # lightweight scheduler test doubles and older integrations
+        token, generation = getattr(state, "token", None), 1
+    if not token:
         state.note("Scheduled announcement sync skipped: no Blackboard session")
         return
-    if not state.courses:
+    with state.lock:
+        courses_empty = not state.courses
+    if courses_empty:
         try:
             courses = get_courses(
-                state.token, prefer_rest=state.prefer_rest, scope=state.scope,
+                token, prefer_rest=state.prefer_rest, scope=state.scope,
                 download_root=state.download_root)
+        except auth.AuthenticationError as exc:
+            if _is_session_rejection(exc):
+                state.reject_session(token, generation, str(exc))
+            state.note("Scheduled announcement sync could not load courses: {}".format(exc))
+            return
         except Exception as exc:  # noqa: BLE001
             state.note("Scheduled announcement sync could not load courses: {}".format(exc))
+            return
+        if not state.session_current(token, generation):
             return
         with state.lock:
             state.courses = [{"name": name, "id": course_id}
@@ -600,12 +998,11 @@ def run_scheduled_announcement_sync(state: State):
         state.note("Scheduled announcement sync skipped: sync already running")
         return
     try:
-        do_announcement_sync(state)
+        do_announcement_sync(state, token=token, generation=generation)
     except Exception as exc:  # noqa: BLE001
         state.note("Scheduled announcement sync failed: {}".format(exc))
 
-
-def announcement_sync_scheduler(state: State):
+def announcement_sync_scheduler(state: State, stop: Optional[threading.Event] = None):
     """Poll announcements on startup, then at the start and end of every local day.
 
     This thread only runs while the app is open, so without the startup sync a
@@ -614,10 +1011,9 @@ def announcement_sync_scheduler(state: State):
     whole window missed if it's closed again by then. Mirrors
     inbound_poll_scheduler's startup poll for mail.
     """
-    waiter = threading.Event()
+    waiter = stop or threading.Event()
     run_scheduled_announcement_sync(state)
-    while True:
-        waiter.wait(seconds_until_next_announcement_sync())
+    while not waiter.wait(seconds_until_next_announcement_sync()):
         run_scheduled_announcement_sync(state)
 
 
@@ -637,19 +1033,35 @@ def do_announcement_summary(state: State):
             state.announcements_summarizing = False
 
 
-def do_todo_sync(state: State):
-    """Refresh Active Neural Queries from Learn's in-scope course To Do feed."""
+def do_todo_sync(state: State, token: Optional[str] = None,
+                  generation: Optional[int] = None):
+    """Refresh Active Neural Queries without crossing browser sessions."""
+    if token is None or generation is None:
+        token, generation = state.session_snapshot()
+    if not token or not state.session_current(token, generation):
+        return
     try:
-        items = rest_mod.get_todo_items(state.token, list(state.courses))
+        with state.lock:
+            courses = list(state.courses)
+        items = rest_mod.get_todo_items(token, courses)
+        if not state.session_current(token, generation):
+            return
         count = state.todo.sync_ntulearn(items)
         state.todo.save()
         state.note("iNTUition To Do synced: {} active neural query(s)".format(count))
+    except rest_mod.RestSessionExpired as exc:
+        message = "Your NTU Learn session token was rejected while reading To Do ({}).".format(exc)
+        state.reject_session(token, generation, message)
+        raise auth.AuthenticationError(message)
     except Exception as exc:  # keep course-list sync useful if calendars fail
         state.note("iNTUition To Do sync failed: {}".format(exc))
 
 
-def do_download(state: State, paths: List[str]):
-    """Download the selected plan entries."""
+def do_download(state: State, paths: List[str], token: Optional[str] = None,
+                generation: Optional[int] = None):
+    """Download selected entries without using a token from a newer session."""
+    if token is None or generation is None:
+        token, generation = _pipeline_session(state)
     try:
         wanted = [e for e in state.plan if e["path"] in set(paths)]
         with state.lock:
@@ -658,16 +1070,20 @@ def do_download(state: State, paths: List[str]):
                 "total": len(wanted),
                 "current": "",
                 "bytes": 0,
+                "pct": 0,
             }
 
         for entry in wanted:
+            if not _pipeline_session_current(state, token, generation):
+                state.note("Download stopped: Blackboard session changed")
+                return
             with state.lock:
                 state.progress["current"] = entry["rel_path"]
 
             try:
                 if entry["type"] == "file":
                     link = get_file_download_link(
-                        state.token, entry["predownload_link"]
+                        token, entry["predownload_link"]
                     )
                     filename = entry.get("filename") or get_filename_from_url(link)
                     if not filename:
@@ -679,7 +1095,7 @@ def do_download(state: State, paths: List[str]):
                     )
                 else:
                     link = get_recorded_lecture_download_link(
-                        state.token, entry["predownload_link"]
+                        token, entry["predownload_link"]
                     )
                     target = entry["path"]
 
@@ -691,8 +1107,13 @@ def do_download(state: State, paths: List[str]):
                 def on_progress(downloaded, total, _entry=entry):
                     with state.lock:
                         state.progress["bytes"] = downloaded
+                        state.progress["pct"] = (
+                            round(downloaded / total * 100) if total else 0
+                        )
 
-                download(state.token, link, target, callback=on_progress)
+                download(token, link, target, callback=on_progress)
+                if not _pipeline_session_current(state, token, generation):
+                    return
                 entry["status"] = "current"
                 state.note("Downloaded {}".format(entry["rel_path"]))
             except Exception as e:  # noqa: BLE001 - one bad item must not stop the run
@@ -705,12 +1126,13 @@ def do_download(state: State, paths: List[str]):
         state.note("Download finished")
     finally:
         with state.lock:
-            state.downloading = False
-            state.progress["current"] = ""
+            if _pipeline_session_current(state, token, generation):
+                state.downloading = False
+                state.progress["current"] = ""
 
 
 
-def do_transcribe(state: State, paths: List[str] = None):
+def do_transcribe(state: State, paths: Optional[List[str]] = None):
     """Generate transcripts for the selected staged media.
 
     Must run while the files are still local: move mode deletes each video once Drive
@@ -736,6 +1158,9 @@ def do_transcribe(state: State, paths: List[str] = None):
             state.note("Loading Whisper {} (first run downloads the model)".format(
                 state.transcribe_model))
             state._transcriber = transcribe_mod.Transcriber(state.transcribe_model)
+        transcriber = state._transcriber
+        if transcriber is None:
+            raise RuntimeError("transcriber could not be initialized")
 
         ok = failed = 0
         for path in media:
@@ -749,7 +1174,7 @@ def do_transcribe(state: State, paths: List[str] = None):
                     state.transcribe_progress["pct"] = round(frac * 100)
 
             try:
-                state._transcriber.transcribe(path, progress=on_progress)
+                transcriber.transcribe(path, progress=on_progress)
                 state.note("Transcribed {}".format(rel))
                 ok += 1
             except Exception as e:  # noqa: BLE001 - one bad file must not end the run
@@ -767,7 +1192,7 @@ def do_transcribe(state: State, paths: List[str] = None):
             state.transcribe_progress["current"] = ""
 
 
-def do_transcribe_drive(state: State, drive_ids: List[str] = None):
+def do_transcribe_drive(state: State, drive_ids: Optional[List[str]] = None):
     """Generate transcripts for media that only exists in Drive: pull each one to a
     throwaway temp copy, transcribe it, upload the result beside it, then delete the
     temp copy. Mirrors transcribe_run.backfill(), but drives progress through the
@@ -806,6 +1231,9 @@ def do_transcribe_drive(state: State, drive_ids: List[str] = None):
             state.note("Loading Whisper {} (first run downloads the model)".format(
                 state.transcribe_model))
             state._transcriber = transcribe_mod.Transcriber(state.transcribe_model)
+        transcriber = state._transcriber
+        if transcriber is None:
+            raise RuntimeError("transcriber could not be initialized")
 
         from googleapiclient.http import MediaIoBaseDownload
 
@@ -830,7 +1258,7 @@ def do_transcribe_drive(state: State, drive_ids: List[str] = None):
                         with state.lock:
                             state.transcribe_progress["pct"] = round(frac * 100)
 
-                    written = state._transcriber.transcribe(local, progress=on_progress)
+                    written = transcriber.transcribe(local, progress=on_progress)
                     parent_id = mirror.ensure_path(
                         [p for p in os.path.dirname(entry["rel_path"]).split("/") if p])
                     for kind in ("vtt", "txt"):
@@ -918,15 +1346,20 @@ def do_generate_summary(state: State, job_id: str, item_id: str, prompt: str,
                 page_anchors=result.pages_cited, ok=False,
                 error="; ".join(result.errors)[:2000])
             with state.lock:
-                state.summary_job.update({
-                    "stage": "Failed", "ok": False, "done": True,
-                    "error_stage": result.stage, "errors": result.errors,
-                    "tex": result.tex,
-                })
+                job = state.summary_job
+                if job is not None:
+                    job.update({
+                        "stage": "Failed", "ok": False, "done": True,
+                        "error_stage": result.stage, "errors": result.errors,
+                        "tex": result.tex,
+                    })
             state.note("Compendium failed for {}: {}".format(
                 material_name, "; ".join(result.errors[:2]) or result.stage))
             return
 
+        if result.tex is None or result.pdf is None:
+            raise summary_mod.SummaryError(
+                "summary backend returned no TeX/PDF for a successful job")
         set_stage("Saving")
         summaries_dir = os.path.join(state.download_root, top_folder, "summaries")
         os.makedirs(summaries_dir, exist_ok=True)
@@ -936,10 +1369,10 @@ def do_generate_summary(state: State, job_id: str, item_id: str, prompt: str,
             summaries_dir, bounded_filename(summaries_dir, "{}-{}.tex".format(stem, stamp)))
         pdf_path = os.path.join(
             summaries_dir, bounded_filename(summaries_dir, "{}-{}.pdf".format(stem, stamp)))
-        with open(tex_path, "w", encoding="utf-8") as f:
-            f.write(result.tex)
-        with open(pdf_path, "wb") as f:
-            f.write(result.pdf)
+        with open(tex_path, "w", encoding="utf-8") as tex_file:
+            tex_file.write(result.tex)
+        with open(pdf_path, "wb") as pdf_file:
+            pdf_file.write(result.pdf)
 
         state.notebook.save_summary(
             job_id, document_id=item_id, material_name=material_name,
@@ -949,12 +1382,14 @@ def do_generate_summary(state: State, job_id: str, item_id: str, prompt: str,
             page_anchors=result.pages_cited, ok=True, error="", report=result.report)
 
         with state.lock:
-            state.summary_job.update({
-                "stage": "Done", "ok": True, "done": True,
-                "pdf_path": pdf_path, "tex_path": tex_path,
-                "backend": result.backend, "model": result.model, "rung": result.rung,
-                "pages_cited": result.pages_cited, "report": result.report,
-            })
+            job = state.summary_job
+            if job is not None:
+                job.update({
+                    "stage": "Done", "ok": True, "done": True,
+                    "pdf_path": pdf_path, "tex_path": tex_path,
+                    "backend": result.backend, "model": result.model, "rung": result.rung,
+                    "pages_cited": result.pages_cited, "report": result.report,
+                })
         state.note("Compendium summary saved: {}".format(
             os.path.relpath(pdf_path, state.download_root)))
     except Exception as exc:  # noqa: BLE001 - a thread dying silently is worse
@@ -980,6 +1415,116 @@ def do_generate_summary(state: State, job_id: str, item_id: str, prompt: str,
     finally:
         with state.lock:
             state.summarizing = False
+
+
+def do_grade_tutorial(state: State, job_id: str, item_id: str, work_path: str,
+                      work_filename: str):
+    """Grading worker thread. Finds the open material's paired solution via
+    solution_pairs, pulls it (and, if present, the tutorial's own question
+    sibling) fresh into a throwaway temp copy the same way Compendium does, then
+    hands all of it plus the student's already-staged upload to grading.grade().
+
+    ``work_path`` was staged by the /api/drive/grade handler before this thread
+    started; removing it is this function's responsibility either way.
+    """
+    def set_stage(text: str):
+        with state.lock:
+            if state.grading_job and state.grading_job["id"] == job_id:
+                state.grading_job["stage"] = text
+
+    material_name = item_id
+    try:
+        with state.lock:
+            files = list(state.drive_files)
+        item = next((dict(entry) for entry in files if entry["id"] == item_id), None)
+        if not item:
+            raise grading_mod.GradingError("material is not in the current Drive index")
+        material_name = item.get("rel_path") or item.get("name") or item_id
+
+        set_stage("Finding solution")
+        pairs = solution_pairs_mod.pair_practice_with_solutions(files)
+        pair = next((p for p in pairs if (p["practice"] or {}).get("id") == item_id), None)
+        if pair is None:
+            pair = next((p for p in pairs if p["solution"]["id"] == item_id), None)
+        if pair is None:
+            raise grading_mod.GradingError(
+                "No professor solution has been matched to this material yet.")
+        solution_ref, practice_ref = pair["solution"], pair["practice"]
+        solution_entry = next((f for f in files if f["id"] == solution_ref["id"]), None)
+        if solution_entry is None:
+            raise grading_mod.GradingError("Matched solution is no longer in the Drive index")
+
+        set_stage("Connecting to Drive")
+        service = drive.build_service(interactive=False)
+
+        with tempfile.TemporaryDirectory(prefix="intuition-grade-") as tmp:
+            set_stage("Downloading solution")
+            solution_path = drive.pull_file(service, solution_entry, tmp)
+            solution_text = drive.extract_learning_text(solution_path)
+
+            practice_text = None
+            if practice_ref and practice_ref["id"] == item_id:
+                # The material already open *is* the practice file - reuse it
+                # rather than pulling the same file twice.
+                practice_text = drive.extract_learning_text(
+                    drive.pull_file(service, item, tmp))
+            elif practice_ref:
+                practice_entry = next(
+                    (f for f in files if f["id"] == practice_ref["id"]), None)
+                if practice_entry:
+                    try:
+                        practice_text = drive.extract_learning_text(
+                            drive.pull_file(service, practice_entry, tmp))
+                    except Exception:  # noqa: BLE001 - tutorial text is a nice-to-have
+                        practice_text = None
+
+            set_stage("Grading")
+            result = grading_mod.grade(
+                work_path, solution_text, solution_ref["name"], practice_text,
+                material_name, preferred_backend=state.research_backend,
+                download_root=state.download_root)
+
+        state.notebook.save_grading(
+            job_id, document_id=item_id, solution_document_id=solution_ref["id"],
+            material_name=material_name, work_filename=work_filename,
+            backend=result.backend, model=result.model, rung=result.rung,
+            feedback=result.feedback, ok=result.ok, error=result.error)
+
+        with state.lock:
+            job = state.grading_job
+            if job is not None and job["id"] == job_id:
+                job.update({
+                    "stage": "Done" if result.ok else "Failed", "ok": result.ok,
+                    "done": True, "feedback": result.feedback,
+                    "backend": result.backend, "model": result.model,
+                    "rung": result.rung, "error": result.error,
+                    "solution_name": solution_ref["name"],
+                })
+        if result.ok:
+            state.note("Grading done for {}: {}".format(
+                material_name, result.model or result.backend))
+        else:
+            state.note("Grading failed for {}: {}".format(material_name, result.error))
+    except Exception as exc:  # noqa: BLE001 - a thread dying silently is worse
+        try:
+            state.notebook.save_grading(
+                job_id, document_id=item_id, material_name=material_name,
+                work_filename=work_filename, ok=False, error=str(exc)[:2000])
+        except Exception:  # noqa: BLE001 - the job status below is the real record
+            pass
+        with state.lock:
+            job = state.grading_job
+            if job is not None and job["id"] == job_id:
+                job.update({"stage": "Failed", "ok": False, "done": True,
+                           "error": str(exc)})
+        state.note("Grading failed for {}: {}".format(material_name, exc))
+    finally:
+        with state.lock:
+            state.grading = False
+        try:
+            os.remove(work_path)
+        except OSError:
+            pass
 
 
 def delete_summary_files(row: Dict) -> None:
@@ -1186,30 +1731,101 @@ def do_push(state: State):
             state.push_progress["current"] = ""
 
 
+def _drive_roots(state: State) -> List[str]:
+    """Return the roots this dashboard session is allowed to browse and pull."""
+    roots = [state.drive_folder]
+    if state.drive_folder == drive.DEFAULT_ROOT_FOLDER:
+        roots.extend(root for root in drive.LEGACY_ROOT_FOLDERS if root not in roots)
+    return roots
+
+
+def _load_drive_inventory(service, state: State):
+    """Refresh Drive metadata, retaining folder ancestry for every file."""
+    return drive.list_files_from_roots(service, _drive_roots(state))
+
+
+def _auto_tag_new_solutions(state: State, files: List[Dict]):
+    """Note-tag any solution document that showed up since the last listing.
+
+    Runs on every inventory refresh so a professor posting a new tutorial and
+    its solution key gets the same "SOL" treatment the initial manual pass
+    applied, with no separate step to remember. Only ever touches documents
+    with no note row yet, so it can never overwrite a student's own notes or a
+    tag from an earlier run.
+    """
+    fresh = solution_pairs_mod.new_solutions(files, state.notebook)
+    tagged = 0
+    for f in fresh:
+        try:
+            state.notebook.save(f["id"], "SOL", rel_path=f.get("rel_path") or f["name"],
+                                 mime_type=f.get("mime_type") or "",
+                                 drive_modified=f.get("modified") or "")
+            tagged += 1
+        except Exception as exc:  # noqa: BLE001 - one bad tag write must not break a sync
+            state.note("Auto-tag failed for {}: {}".format(
+                f.get("rel_path") or f["name"], exc))
+    if tagged:
+        state.note("Auto-tagged {} new solution document(s) with SOL".format(tagged))
+
+
+def _merge_external_drive_files(state: State, files: List[Dict]) -> List[Dict]:
+    """Fold "Search my Drive" hits back into a freshly-listed inventory.
+
+    Must be called with state.lock held - reads state.external_drive_files.
+    """
+    known_ids = {f["id"] for f in files}
+    merged = files + [f for fid, f in state.external_drive_files.items()
+                       if fid not in known_ids]
+    return sorted(merged, key=lambda item: item["rel_path"].lower())
+
+
 def do_drive_list(state: State):
     try:
         service = drive.build_service()
-        roots = [state.drive_folder]
-        if state.drive_folder == drive.DEFAULT_ROOT_FOLDER:
-            roots.extend(root for root in drive.LEGACY_ROOT_FOLDERS
-                         if root not in roots)
-        by_id = {}
-        counts = []
-        for root in roots:
-            listed = drive.DriveMirror(service, root_folder=root).list_files()
-            counts.append("{}: {}".format(root, len(listed)))
-            for item in listed:
-                by_id.setdefault(item["id"], item)
-        files = sorted(by_id.values(), key=lambda item: item["rel_path"].lower())
+        files, count_by_root = _load_drive_inventory(service, state)
         with state.lock:
-            state.drive_files = files
+            state.drive_files = _merge_external_drive_files(state, files)
         state.note("Drive inventory: {} file(s) ({})".format(
-            len(files), ", ".join(counts)))
+            len(files), ", ".join("{}: {}".format(root, count)
+                                  for root, count in count_by_root.items())))
+        _auto_tag_new_solutions(state, files)
     except Exception as exc:  # noqa: BLE001 - expose optional Drive failures in console
         state.note("Drive inventory failed: {}".format(exc))
     finally:
         with state.lock:
             state.drive_listing = False
+
+
+def do_drive_link(state: State):
+    """Run the Google OAuth consent flow, then refresh the Drive inventory.
+
+    ``drive.link_interactively`` opens the system browser and blocks on a
+    throwaway loopback server until Google redirects back (or the 5-minute
+    timeout fires), so this must run on its own thread.
+    """
+    try:
+        state.note("Drive: opening browser for Google authorisation")
+        drive.link_interactively(open_browser=True)
+        with state.lock:
+            state.drive_link_error = ""
+        state.note("Drive connected")
+    except Exception as exc:  # noqa: BLE001 - surface consent/timeout failures in the UI
+        message = str(exc) or exc.__class__.__name__
+        with state.lock:
+            state.drive_link_error = message
+        state.note("Drive connection failed: {}".format(message))
+        with state.lock:
+            state.drive_linking = False
+        return
+    with state.lock:
+        state.drive_linking = False
+        if not state.drive_listing:
+            state.drive_listing = True
+            should_list = True
+        else:
+            should_list = False
+    if should_list:
+        do_drive_list(state)
 
 
 def do_drive_pull(state: State, ids: List[str]):
@@ -1221,30 +1837,31 @@ def do_drive_pull(state: State, ids: List[str]):
             return
         with state.lock:
             allowed = {item["id"]: dict(item) for item in state.drive_files}
+
+        # The browser sends IDs, while the destination is determined by the
+        # inventory's rel_path.  A cached inventory can be stale (for example after
+        # a file was moved in Drive), so refresh before resolving an unknown ID.
+        # Never use the filename-only metadata fallback here: it is the exact path
+        # by which a file from any module gets dumped at the sync root.
+        missing_ids = [item_id for item_id in ids if item_id not in allowed]
+        if missing_ids:
+            try:
+                refreshed, _counts = _load_drive_inventory(service, state)
+                with state.lock:
+                    state.drive_files = refreshed
+                allowed = {item["id"]: dict(item) for item in refreshed}
+            except Exception as exc:  # noqa: BLE001 - report and skip unsafe targets
+                state.note("Drive inventory refresh failed before pull: {}".format(exc))
+
         targets = []
         for item_id in ids:
             if item_id in allowed:
                 targets.append(allowed[item_id])
             else:
-                try:
-                    res = service.files().get(
-                        fileId=item_id,
-                        fields="id,name,mimeType,size,modifiedTime",
-                        supportsAllDrives=True
-                    ).execute()
-                    item = {
-                        "id": res["id"],
-                        "name": res.get("name", item_id),
-                        "rel_path": res.get("name", item_id),
-                        "mime_type": res.get("mimeType") or "application/octet-stream",
-                        "size": int(res.get("size") or 0),
-                        "modified": res.get("modifiedTime"),
-                    }
-                    targets.append(item)
-                    with state.lock:
-                        state.drive_files.append(item)
-                except Exception as exc:  # noqa: BLE001
-                    state.note("Could not resolve metadata for Drive file {}: {}".format(item_id, exc))
+                state.note(
+                    "Drive file {} was not found under the configured Drive roots; "
+                    "skipped to protect folder structure".format(item_id)
+                )
         if not targets:
             state.note("No valid Drive files resolved for pull")
             return
@@ -1303,32 +1920,65 @@ def do_inbound_sync(state: State):
             state.inbound_syncing = False
 
 
+def _is_session_rejection(exc: Exception) -> bool:
+    text = str(exc).lower()
+    if "session token" in text and ("rejected" in text or "expired" in text):
+        return True
+    # api.get_courses raises this wording when Learn bounces the request to the
+    # SSO login page: the cookie is structurally valid (it passed auth.validate)
+    # but the server no longer honours it - the same "paste a fresh one" case,
+    # only phrased differently. Without this the session is never flagged
+    # rejected, so the dashboard's Authorisation panel stays hidden and there is
+    # nowhere to enter a new BbRouter cookie.
+    if "login page" in text and ("redirect" in text or "refresh the bbrouter" in text):
+        return True
+    return False
+
 def do_unified_sync(state: State):
-    """Refresh course nodes, announcements, and inbound mail from one action."""
+    """Refresh Blackboard-backed feeds using one stable session generation."""
+    token, generation = state.session_snapshot()
     errors = []
     try:
+        if not token:
+            errors.append("Course nodes: no Blackboard session")
+            return
         try:
-            courses = get_courses(state.token, prefer_rest=state.prefer_rest,
+            courses = get_courses(token, prefer_rest=state.prefer_rest,
                                   scope=state.scope, download_root=state.download_root)
+            if not state.session_current(token, generation):
+                return
             with state.lock:
                 state.courses = [{"name": name, "id": course_id}
                                  for name, course_id in courses]
-            do_todo_sync(state)
+            do_todo_sync(state, token=token, generation=generation)
             state.note("Unified sync refreshed {} course nodes".format(len(courses)))
-        except Exception as exc:  # noqa: BLE001
+        except auth.AuthenticationError as exc:
+            message = "Course nodes: {}".format(exc)
+            if _is_session_rejection(exc):
+                state.reject_session(token, generation, message)
+            errors.append(message)
+            return
+        except Exception as exc:  # noqa: BLE001 - keep the failure visible and stop stale fan-out
             errors.append("Course nodes: {}".format(exc))
+            return
 
-        if state.courses:
-            with state.lock:
+        if not state.session_current(token, generation):
+            return
+        with state.lock:
+            has_courses = bool(state.courses)
+            if has_courses:
                 state.announcements_syncing = True
                 state.announcement_errors = []
+        if has_courses:
             try:
-                do_announcement_sync(state)
+                do_announcement_sync(state, token=token, generation=generation)
             except Exception as exc:  # noqa: BLE001
                 errors.append("Announcements: {}".format(exc))
         else:
             errors.append("Announcements: no course nodes available")
 
+        if not state.session_current(token, generation):
+            return
         if state.inbound_db:
             errors.append("Inbound: configured store cannot be synced")
         else:
@@ -1341,10 +1991,10 @@ def do_unified_sync(state: State):
                 errors.append("Inbound: {}".format(exc))
     finally:
         with state.lock:
-            state.unified_sync_error = " · ".join(errors)
-            state.unified_syncing = False
+            if state.session_generation == generation:
+                state.unified_sync_error = " · ".join(errors)
+                state.unified_syncing = False
         state.note("Unified sync finished" + (" with errors" if errors else ""))
-
 
 def run_scheduled_inbound_poll(state: State):
     """Poll Outlook unless Inbound is pointed at an external read-only store."""
@@ -1361,17 +2011,21 @@ def run_scheduled_inbound_poll(state: State):
     do_inbound_sync(state)
 
 
-def inbound_poll_scheduler(state: State):
+def inbound_poll_scheduler(state: State, stop: Optional[threading.Event] = None):
     """Poll Outlook on startup and every twelve hours thereafter."""
-    waiter = threading.Event()
+    waiter = stop or threading.Event()
     run_scheduled_inbound_poll(state)
-    while True:
-        waiter.wait(INBOUND_POLL_SECONDS)
+    while not waiter.wait(INBOUND_POLL_SECONDS):
         run_scheduled_inbound_poll(state)
 
 
 class Handler(BaseHTTPRequestHandler):
-    state: State = None  # set by serve()
+    state: Optional[State] = None  # set by serve()
+    MAX_JSON_BODY = 2 * 1024 * 1024
+    MAX_DRIVE_LEARN_BODY = 4 * 1024 * 1024
+    MAX_SCHEDULE_BODY = 25 * 1024 * 1024
+    MAX_PREVIEW_BODY = 50 * 1024 * 1024
+    MAX_GRADE_UPLOAD_JSON_BODY = 12 * 1024 * 1024
 
     def log_message(self, *args):
         pass  # keep the console clean; the UI has its own log
@@ -1380,15 +2034,93 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _body(self) -> Dict:
-        length = int(self.headers.get("Content-Length") or 0)
+    def _send_preview_error(self, message: str, status: int = 500,
+                            request_id: str = ""):
+        # /api/drive/content is loaded straight into the material drawer's
+        # <iframe> by the browser, never read back as JSON. A JSON error body
+        # here renders as Chrome's pretty-printed JSON viewer inside the drawer;
+        # serve a plain styled page so the drawer shows a legible reason instead.
+        detail = "<p class=\"rid\">Reference {}</p>".format(html.escape(request_id)) \
+            if request_id else ""
+        page = (
+            "<!doctype html><meta charset=\"utf-8\">"
+            "<style>html,body{{margin:0;height:100%}}"
+            "body{{display:flex;align-items:center;justify-content:center;"
+            "font:14px/1.7 system-ui,-apple-system,Segoe UI,sans-serif;"
+            "color:#8b93a7;background:#0f1117;padding:24px;text-align:center}}"
+            ".rid{{margin-top:10px;font-size:12px;opacity:.7}}</style>"
+            "<div><p>{}</p>{}</div>"
+        ).format(html.escape(message), detail)
+        body = page.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _request_id(self) -> str:
+        return uuid.uuid4().hex[:12]
+
+    def _authorized(self) -> bool:
+        expected = getattr(self.state, "local_secret", None)
+        # Unit callers that provide a lightweight fake State do not have the
+        # dashboard session cookie; real State instances always do.
+        if not expected:
+            return True
+        supplied = self.headers.get("X-iNTUition-Session", "")
+        if not supplied:
+            cookie_header = self.headers.get("Cookie", "")
+            for cookie in cookie_header.split(";"):
+                name, separator, value = cookie.strip().partition("=")
+                if separator and name == "intuition_session":
+                    supplied = value
+                    break
+        if not supplied:
+            # The material drawer loads /api/drive/content as an <iframe>/<img>/
+            # <video> element src, which carries neither the X-iNTUition-Session
+            # header (only the fetch() wrapper adds that) nor, in the packaged
+            # WebView2 shell, the SameSite cookie. openMaterial() appends the same
+            # secret as ?s= for these element-driven GETs.
+            query = urlparse(getattr(self, "path", "")).query
+            supplied = (parse_qs(query).get("s") or [""])[0]
+        return bool(supplied) and hmac.compare_digest(supplied, expected)
+
+    def _require_auth(self) -> bool:
+        if self._authorized():
+            return True
+        # /api/drive/content is rendered straight into the drawer's <iframe>; a
+        # JSON 401 body there shows up as Chrome's pretty-printed JSON viewer.
+        # Serve the styled HTML error so the drawer stays legible.
+        if urlparse(self.path).path == "/api/drive/content":
+            self._send_preview_error(
+                "The dashboard session could not be verified for this preview. "
+                "Reload the dashboard and open the file again.", status=401)
+        else:
+            self._send({"error": "local dashboard session required"}, status=401)
+        return False
+
+    def _body(self, max_bytes: int = MAX_JSON_BODY) -> Dict:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("invalid Content-Length")
+        if length < 0 or length > max_bytes:
+            raise ValueError("request body is too large")
         if not length:
             return {}
-        return json.loads(self.rfile.read(length).decode("utf-8"))
+        content_type = self.headers.get("Content-Type", "")
+        if content_type and "application/json" not in content_type.lower():
+            raise ValueError("expected application/json")
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("incomplete request body")
+        return json.loads(raw.decode("utf-8"))
 
     def do_GET(self):
         try:
@@ -1396,9 +2128,10 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass  # client went away mid-response; not a real error
         except Exception as exc:  # noqa: BLE001 - last-resort dashboard telemetry
-            self.state.note("GET {} failed: {}".format(self.path, exc))
+            request_id = self._request_id()
+            self.state.note("GET {} failed [{}]: {}".format(self.path, request_id, exc))
             try:
-                self._send({"error": str(exc) or "request failed"}, status=500)
+                self._send({"error": "request failed", "request_id": request_id}, status=500)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
@@ -1406,9 +2139,22 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/":
-            body = load_page().encode("utf-8")
+            secret = getattr(self.state, "local_secret", "")
+            # Two ways for the page to prove it is the page: the cookie (used by a
+            # real browser via --browser) and the rewritten <meta> the script
+            # echoes back as a header. The desktop WebView2 shell does not send
+            # the SameSite=Strict cookie on fetch()es to http:// loopback, so the
+            # header is what actually authorises its API calls.
+            body = load_page().replace(
+                "__INTUITION_SESSION__", secret).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header(
+                "Set-Cookie",
+                "intuition_session={}; Path=/; HttpOnly; SameSite=Strict".format(
+                    secret),
+            )
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1424,8 +2170,8 @@ class Handler(BaseHTTPRequestHandler):
             content_type = mimetypes.guess_type(asset)[0] or "application/octet-stream"
             self.send_response(200)
             self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
@@ -1437,6 +2183,8 @@ class Handler(BaseHTTPRequestHandler):
             # optional integrations and may be slow while they initialise.
             self._send({"ok": True})
             return
+        if path.startswith("/api/") and not self._require_auth():
+            return
         if path == "/api/drive/memory":
             query = parse_qs(parsed.query)
             session_id = (query.get("session") or [""])[0]
@@ -1446,10 +2194,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send({"items": self.state.chat_memory.recent(session_id, item_id)})
             return
+        if path == "/api/lab/coach/history":
+            query = parse_qs(parsed.query)
+            session_id = (query.get("session") or [""])[0]
+            rel_path = (query.get("path") or [""])[0]
+            if not session_id or not rel_path:
+                self._send({"error": "session and path are required"}, status=400)
+                return
+            _ws, repo = self.state.lab_repos.resolve((query.get("repo") or [""])[0])
+            self._send({"items": self.state.chat_memory.recent(
+                session_id, "lab:" + repo + "/" + rel_path)})
+            return
+        if path == "/api/lab/repos":
+            self._send({"repos": self.state.lab_repos.list()})
+            return
         if path == "/api/lab/tree":
+            ws, repo = self.state.lab_repos.resolve(
+                (parse_qs(parsed.query).get("repo") or [""])[0])
             self._send({
-                "tree": self.state.lab_workspace.tree(),
-                "inputKinds": self.state.lab_workspace.input_kinds(),
+                "tree": ws.tree(),
+                "inputKinds": ws.input_kinds(),
+                "repos": self.state.lab_repos.list(),
+                "repo": repo,
             })
             return
         if path == "/api/lab/output":
@@ -1470,7 +2236,8 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             rel_path = (query.get("path") or [""])[0]
             try:
-                content = self.state.lab_workspace.read(rel_path)
+                ws, _repo = self.state.lab_repos.resolve((query.get("repo") or [""])[0])
+                content = ws.read(rel_path)
             except lab_mod.WorkspaceError as exc:
                 self._send({"error": str(exc)}, status=404)
                 return
@@ -1478,6 +2245,24 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/research":
             self._send(self.state.ureca.snapshot())
+            return
+        if path == "/api/research/suggest":
+            job_id = (parse_qs(parsed.query).get("job") or [""])[0]
+            if not job_id:
+                self._send({"error": "job id is required"}, status=400)
+                return
+            with self.state.lock:
+                job = dict(self.state.research_suggest_job or {})
+            if not job or job.get("id") != job_id:
+                self._send({"error": "no such research suggestion job"}, status=404)
+                return
+            self._send({"job": job})
+            return
+        if path == "/api/research/faculty":
+            query = parse_qs(parsed.query)
+            self._send({"faculty": faculty_db.directory((query.get("q") or [""])[0],
+                                    (query.get("school") or [""])[0]),
+                        "catalogue": faculty_db.metadata()})
             return
         if path == "/api/profile":
             self._send({"profile": self.state.profile.get()})
@@ -1512,6 +2297,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send({"error": "material id is required"}, status=400)
                 return
             self._send({"items": self.state.notebook.list_summaries(item_id)})
+            return
+        if path == "/api/study/gradings":
+            item_id = (parse_qs(parsed.query).get("id") or [""])[0]
+            if not item_id:
+                self._send({"error": "material id is required"}, status=400)
+                return
+            self._send({"items": self.state.notebook.list_gradings(item_id)})
             return
         if path == "/api/study/summary/pdf":
             job_id = (parse_qs(parsed.query).get("job") or [""])[0]
@@ -1577,22 +2369,47 @@ class Handler(BaseHTTPRequestHandler):
                 item = next((dict(entry) for entry in self.state.drive_files
                              if entry["id"] == item_id), None)
             if not item:
-                self._send({"error": "refresh Drive and select a listed file"}, status=404)
+                self._send_preview_error(
+                    "This file is no longer in the loaded Drive listing. "
+                    "Refresh Drive and select it again.", status=404)
+                return
+            if int(item.get("size") or 0) > self.MAX_PREVIEW_BODY:
+                self._send_preview_error(
+                    "This file is larger than the 50 MB preview limit. "
+                    "Open it in Google Drive instead.", status=413)
                 return
             try:
                 service = drive.build_service(interactive=False)
                 with tempfile.TemporaryDirectory(prefix="intuition-preview-") as tmp:
                     target = drive.pull_file(service, item, tmp)
-                    with open(target, "rb") as stream:
-                        body = stream.read()
-                # mimetypes.guess_type doesn't know source-code extensions like .java or
-                # .cpp (returns None), which would otherwise fall through to
-                # application/octet-stream below - Drive already told us the real type
-                # in item["mime_type"] (that's what the frontend used to pick the
-                # <iframe> rendering path in the first place), so trust that first.
-                content_type = mimetypes.guess_type(target)[0] or item.get("mime_type")
-                if item.get("mime_type") in drive.GOOGLE_EXPORTS:
-                    content_type = drive.GOOGLE_EXPORTS[item["mime_type"]][0]
+                    is_docx = (target.lower().endswith(".docx")
+                               or item.get("mime_type") == drive.DOCX_MIME)
+                    if is_docx:
+                        # No browser renders a .docx natively; convert it to a
+                        # styled HTML page the drawer's <iframe> can display.
+                        try:
+                            body = drive.docx_to_html(target).encode("utf-8")
+                        except drive.DriveError as exc:
+                            self.state.note("Drive .docx preview: {}".format(exc))
+                            self._send_preview_error(
+                                "This Word document could not be rendered for "
+                                "preview. Open it in Google Drive instead.",
+                                status=422)
+                            return
+                        content_type = "text/html; charset=utf-8"
+                    else:
+                        with open(target, "rb") as stream:
+                            body = stream.read()
+                        # mimetypes.guess_type doesn't know source-code extensions like
+                        # .java or .cpp (returns None), which would otherwise fall
+                        # through to application/octet-stream below - Drive already
+                        # told us the real type in item["mime_type"] (that's what the
+                        # frontend used to pick the <iframe> rendering path in the
+                        # first place), so trust that first.
+                        content_type = (mimetypes.guess_type(target)[0]
+                                        or item.get("mime_type"))
+                        if item.get("mime_type") in drive.GOOGLE_EXPORTS:
+                            content_type = drive.GOOGLE_EXPORTS[item["mime_type"]][0]
                 self.send_response(200)
                 self.send_header("Content-Type", content_type or "application/octet-stream")
                 self.send_header("Content-Length", str(len(body)))
@@ -1601,7 +2418,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
             except Exception as exc:  # noqa: BLE001 - report Drive preview failures
-                self._send({"error": str(exc)}, status=500)
+                request_id = self._request_id()
+                self.state.note("Drive preview failed [{}]: {}".format(request_id, exc))
+                self._send_preview_error(
+                    "This material could not be fetched from Google Drive for "
+                    "preview. Try refreshing Drive, or open it in Google Drive.",
+                    status=500, request_id=request_id)
             return
 
         if path == "/api/drive/tree":
@@ -1622,9 +2444,10 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass  # client went away mid-response; not a real error
         except Exception as exc:  # noqa: BLE001 - last-resort dashboard telemetry
-            self.state.note("PUT {} failed: {}".format(self.path, exc))
+            request_id = self._request_id()
+            self.state.note("PUT {} failed [{}]: {}".format(self.path, request_id, exc))
             try:
-                self._send({"error": str(exc) or "request failed"}, status=500)
+                self._send({"error": "request failed", "request_id": request_id}, status=500)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
@@ -1637,28 +2460,46 @@ class Handler(BaseHTTPRequestHandler):
         state = self.state
         params = parse_qs(parsed.query)
         name = (params.get("name") or ["upload.txt"])[0]
-        length = int(self.headers.get("Content-Length") or 0)
+        if not self._require_auth():
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            self._send({"error": "invalid Content-Length"}, status=400)
+            return
         if not length:
             self._send({"error": "empty upload"}, status=400)
             return
-        blob = self.rfile.read(length)
+        if length > self.MAX_SCHEDULE_BODY:
+            self._send({"error": "schedule upload is too large"}, status=413)
+            return
 
         suffix = os.path.splitext(name)[1] or ".txt"
-        tmp = os.path.join(tempfile.gettempdir(),
-                           "intuition_schedule_upload" + suffix)
+        safe_name = os.path.basename(name) or "upload.txt"
+        fd, tmp = tempfile.mkstemp(
+            prefix="intuition_schedule_upload.", suffix=suffix,
+        )
         try:
-            with open(tmp, "wb") as f:
-                f.write(blob)
+            with os.fdopen(fd, "wb") as f:
+                remaining = length
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("incomplete schedule upload")
+                    f.write(chunk)
+                    remaining -= len(chunk)
             result = schedule_mod.parse_file(tmp)
         except schedule_mod.ScheduleError as e:
             self._send({"error": str(e)}, status=400)
             return
         except Exception as e:  # noqa: BLE001 - report any parse failure to the UI
-            self._send({"error": "Could not read {}: {}".format(name, e)}, status=400)
+            self._send({"error": "Could not read {}: {}".format(safe_name, e)}, status=400)
             return
         finally:
-            if os.path.exists(tmp):
+            try:
                 os.remove(tmp)
+            except FileNotFoundError:
+                pass
 
         if not result["sessions"]:
             self._send({"error": "No classes found in {}. Expected a STARS "
@@ -1681,9 +2522,10 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass  # client went away mid-response; not a real error
         except Exception as exc:  # noqa: BLE001 - no interface failure should be silent
-            self.state.note("POST {} failed: {}".format(self.path, exc))
+            request_id = self._request_id()
+            self.state.note("POST {} failed [{}]: {}".format(self.path, request_id, exc))
             try:
-                self._send({"error": str(exc) or "request failed"}, status=500)
+                self._send({"error": "request failed", "request_id": request_id}, status=500)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
@@ -1691,10 +2533,21 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         state = self.state
 
+        # Token exchange is the bootstrap endpoint; every other API operation
+        # requires the cookie issued by GET "/".
+        if path != "/api/token" and path.startswith("/api/") and not self._require_auth():
+            return
+
         try:
-            payload = self._body()
-        except ValueError:
+            body_limit = (self.MAX_DRIVE_LEARN_BODY if path == "/api/drive/learn"
+                          else self.MAX_GRADE_UPLOAD_JSON_BODY if path == "/api/study/grade"
+                          else self.MAX_JSON_BODY)
+            payload = self._body(body_limit)
+        except (TypeError, ValueError):
             self._send({"error": "bad json"}, status=400)
+            return
+        if not isinstance(payload, dict):
+            self._send({"error": "request body must be a JSON object"}, status=400)
             return
 
         if path == "/api/client-log":
@@ -1741,23 +2594,21 @@ class Handler(BaseHTTPRequestHandler):
             except auth.AuthenticationError as e:
                 self._send({"error": str(e)}, status=400)
                 return
-            with state.lock:
-                state.token = token
-                # Every one of these describes the *previous* session. Left latched,
-                # a 401 from an expired token keeps the UI reporting that the link
-                # was rejected however many good tokens are pasted after it.
-                state.unified_sync_error = ""
-                state.announcement_errors = []
-                state.inbound_error = ""
-                state.scan_errors = []
-            threading.Thread(target=state.refresh_identity, daemon=True).start()
+            generation = state.install_token(token)
+            threading.Thread(target=state.refresh_identity,
+                             args=(token, generation), daemon=True).start()
             state.note("Session token accepted")
             self._send({"ok": True})
             return
 
         if path == "/api/settings":
             with state.lock:
-                busy = state.scanning or state.downloading or state.pushing
+                busy = any((
+                    state.scanning, state.downloading, state.pushing,
+                    state.drive_listing, state.pulling, state.transcribing,
+                    state.summarizing, state.unified_syncing,
+                    state.announcements_syncing, state.inbound_syncing,
+                ))
                 if "prefer_rest" in payload:
                     state.prefer_rest = bool(payload["prefer_rest"])
             if payload.get("download_root"):
@@ -1766,10 +2617,30 @@ class Handler(BaseHTTPRequestHandler):
                 if busy:
                     self._send(
                         {"error": "cannot change the sync folder while a scan, "
-                                  "download or push is running"}, status=409)
+                                  "download, Drive, or background job is running"},
+                        status=409)
                     return
                 state.rebind_root(payload["download_root"])
             self._send({"ok": True})
+            return
+
+        if path == "/api/lab/repos":
+            action = payload.get("action")
+            name = str(payload.get("name") or "")
+            try:
+                if action == "create":
+                    state.lab_repos.create(name)
+                elif action == "delete":
+                    state.lab_repos.delete(name)
+                elif action == "rename":
+                    state.lab_repos.rename(name, str(payload.get("newName") or ""))
+                else:
+                    self._send({"error": "unknown action"}, status=400)
+                    return
+            except lab_mod.WorkspaceError as exc:
+                self._send({"error": str(exc)}, status=400)
+                return
+            self._send({"ok": True, "repos": state.lab_repos.list()})
             return
 
         if path == "/api/lab/file":
@@ -1777,17 +2648,36 @@ class Handler(BaseHTTPRequestHandler):
             rel_path = str(payload.get("path") or "")
             updated_content = None
             try:
+                ws, _repo = state.lab_repos.resolve(payload.get("repo"))
                 if action == "create":
-                    state.lab_workspace.create(rel_path, str(payload.get("kind") or "file"), str(payload.get("inputKind") or "none"))
+                    ws.create(rel_path, str(payload.get("kind") or "file"), str(payload.get("inputKind") or "none"))
                 elif action == "write":
-                    state.lab_workspace.write(rel_path, payload.get("content", ""))
+                    content = payload.get("content", "")
+                    if not isinstance(content, str):
+                        self._send({"error": "content must be text"}, status=400)
+                        return
+                    if len(content) > 1_000_000:
+                        self._send({"error": "file content is limited to 1 MB"}, status=413)
+                        return
+                    ws.write(rel_path, content)
                 elif action == "scaffold":
-                    updated_content = state.lab_workspace.apply_input_kind(
+                    updated_content = ws.apply_input_kind(
                         rel_path, str(payload.get("inputKind") or "none"))
                 elif action == "delete":
-                    state.lab_workspace.delete(rel_path)
+                    ws.delete(rel_path)
                 elif action == "rename":
-                    state.lab_workspace.rename(rel_path, str(payload.get("newPath") or ""))
+                    ws.rename(rel_path, str(payload.get("newPath") or ""))
+                elif action == "move":
+                    state.lab_repos.move_file(
+                        _repo, rel_path, str(payload.get("toRepo") or ""))
+                elif action == "reorder":
+                    order = payload.get("order")
+                    if not isinstance(order, list) or not all(
+                            isinstance(name, str) for name in order):
+                        self._send({"error": "order must be a list of names"},
+                                   status=400)
+                        return
+                    ws.reorder(str(payload.get("parent") or ""), order)
                 else:
                     self._send({"error": "unknown action"}, status=400)
                     return
@@ -1796,8 +2686,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             response = {
                 "ok": True,
-                "tree": state.lab_workspace.tree(),
-                "inputKinds": state.lab_workspace.input_kinds(),
+                "tree": ws.tree(),
+                "inputKinds": ws.input_kinds(),
+                "repos": state.lab_repos.list(),
             }
             if updated_content is not None:
                 response["content"] = updated_content
@@ -1808,14 +2699,32 @@ class Handler(BaseHTTPRequestHandler):
             rel_path = str(payload.get("path") or "")
             language = str(payload.get("language") or "")
             input_kind = str(payload.get("inputKind") or "none")
+            if os.path.splitext(rel_path)[1].lower() not in lab_mod.CODE_EXTENSIONS:
+                self._send({"error": "only .py, .java and .c files can be run"},
+                           status=400)
+                return
             try:
-                state.lab_workspace.set_input_kind(rel_path, input_kind)
-                job = state.lab_jobs.start(state.lab_workspace, rel_path, language, input_kind)
+                ws, _repo = state.lab_repos.resolve(payload.get("repo"))
+                autofilled_source = None
+                if language == "python":
+                    # A file that only defines its algorithm and never calls it
+                    # runs "successfully" with nothing to trace - fix that before
+                    # Run rather than let Simulation quietly come up empty. Cheap
+                    # to call every time: the ast check below returns fast when
+                    # the file already has a real entry point, so this only ever
+                    # reaches the model on the file that actually needs it.
+                    autofilled_source = lab_mod.autofill_entry_point(
+                        ws, rel_path, state.research_backend, state.download_root)
+                ws.set_input_kind(rel_path, input_kind)
+                job = state.lab_jobs.start(ws, rel_path, language, input_kind)
             except lab_mod.WorkspaceError as exc:
                 self._send({"error": str(exc)}, status=400)
                 return
-            self._send({"ok": True, "job": job.id, "inputKind": job.input_kind,
-                        "inputPreview": job.input_preview, "sourceHash": job.source_hash})
+            response = {"ok": True, "job": job.id, "inputKind": job.input_kind,
+                        "inputPreview": job.input_preview, "sourceHash": job.source_hash}
+            if autofilled_source is not None:
+                response["autofilledSource"] = autofilled_source
+            self._send(response)
             return
 
         if path == "/api/lab/kill":
@@ -1826,7 +2735,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/lab/analyze":
             rel_path = str(payload.get("path") or "")
             try:
-                content = state.lab_workspace.read(rel_path)
+                ws, _repo = state.lab_repos.resolve(payload.get("repo"))
+                content = ws.read(rel_path)
             except lab_mod.WorkspaceError as exc:
                 self._send({"error": str(exc)}, status=400)
                 return
@@ -1860,6 +2770,90 @@ class Handler(BaseHTTPRequestHandler):
                         "model": result.get("model"), "sourceHash": source_hash})
             return
 
+        if path == "/api/lab/coach":
+            rel_path = str(payload.get("path") or "")
+            session_id = str(payload.get("session") or "default")[:80]
+            question = str(payload.get("question") or "").strip()[:2000]
+            mode = str(payload.get("mode") or "ask")  # "ask" | "live" | "run"
+            run_context = str(payload.get("runContext") or "")[:4000]
+            previous_source = str(payload.get("previousSource") or "")
+            try:
+                ws, repo = state.lab_repos.resolve(payload.get("repo"))
+                content = ws.read(rel_path)
+            except lab_mod.WorkspaceError as exc:
+                self._send({"error": str(exc)}, status=400)
+                return
+            if not content.strip():
+                self._send({"error": "file is empty"}, status=400)
+                return
+            if mode == "ask" and not question:
+                self._send({"error": "enter a question"}, status=400)
+                return
+            source_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            expected_hash = str(payload.get("sourceRevision") or "")
+            if expected_hash and expected_hash != source_hash:
+                self._send({"error": "file changed before asking; ask again",
+                            "sourceHash": source_hash}, status=409)
+                return
+            lines = content.splitlines()
+            numbered = "\n".join("{}: {}".format(i + 1, line) for i, line in enumerate(lines))
+            material_id = "lab:" + repo + "/" + rel_path
+            try:
+                history = state.chat_memory.recent(session_id, material_id, limit=8)
+            except Exception as memory_exc:  # noqa: BLE001 - answer even if local history is damaged
+                state.note("Lab coach history unavailable: {}".format(memory_exc))
+                history = []
+            conversation = "\n".join(
+                "{}: {}".format(turn["role"].title(), turn["content"][:2000])
+                for turn in history)
+            header = ("Source file ({}):\n{}\n---\nRecent run output (if any):\n{}\n---\n"
+                      "Recent conversation:\n{}\n---\n").format(
+                rel_path, numbered, run_context or "(none)", conversation or "(none)")
+            if mode == "ask":
+                prompt = header + "Student question: {}".format(question)
+            else:
+                # Unprompted (live/run) commentary is grounded in the delta since the
+                # coach last looked, not the whole file again - see _changed_line_ranges.
+                if not previous_source:
+                    delta_note = "This is your first look at this file."
+                elif previous_source == content:
+                    delta_note = "The visible code is unchanged since you last looked."
+                else:
+                    changed = _changed_line_ranges(previous_source, content)
+                    delta_note = (
+                        "New or changed lines since you last looked: {}. Comment only on "
+                        "those - do not re-explain or repeat feedback on lines you already "
+                        "discussed.".format(changed) if changed
+                        else "The visible code is unchanged since you last looked.")
+                if mode == "run":
+                    prompt = header + delta_note + (
+                        " The student just ran this file. Give a brief real-time comment "
+                        "on the result above.")
+                else:
+                    prompt = header + delta_note + (
+                        " The student is actively editing. Give a brief real-time "
+                        "observation about the new/changed lines only - a spotted issue, "
+                        "or a natural small next step.")
+            try:
+                result = ai_provider.complete_tier(
+                    "chat", prompt, LAB_COACH_SYSTEM, preferred=state.research_backend,
+                    max_tokens=700, download_root=state.download_root)
+            except ai_provider.ProviderError as exc:
+                self._send({"error": str(exc)}, status=502)
+                return
+            answer = (result.get("text") or "").strip()
+            try:
+                if question:
+                    state.chat_memory.add(session_id, material_id, "user", question)
+                state.chat_memory.add(session_id, material_id, "assistant", answer,
+                                      backend=result.get("backend") or "",
+                                      model=result.get("model") or "")
+            except Exception as memory_exc:  # noqa: BLE001 - the answer still reaches the student
+                state.note("Lab coach history save failed: {}".format(memory_exc))
+            self._send({"answer": answer, "mode": mode, "backend": result.get("backend"),
+                        "model": result.get("model"), "sourceHash": source_hash})
+            return
+
         if path == "/api/research":
             action = payload.get("action")
             try:
@@ -1887,43 +2881,44 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/research/suggest":
-            prompt = "Student profile: {}".format(state.profile.summary())
-            codes = course_codes(state)
-            if codes:
-                prompt += "\nCourses this semester: {}".format(", ".join(codes))
             # Typed fresh for this run when given, so it takes effect immediately -
             # otherwise the profile's saved value, which the debounced autosave in
             # rpKeywords may not have persisted yet if the student typed and pressed
             # "Suggest topics" in the same breath.
             keywords = str(payload.get("keywords") or "").strip()[:200] or state.profile.get()["keywords"]
-            if keywords:
-                prompt += "\nInterests / keywords to anchor ideas in: {}".format(keywords)
-            prompt += "\n---\nReport the JSON array of proposed ideas now."
-            # The "scholar" tier never ladders or falls back (see ai_provider.TIERS),
-            # so one off-format or degenerate reply would otherwise surface as "no
-            # topics found" after the student's single press. Unlike the deep draft
-            # pass this call is short and has no side effects until a suggestion is
-            # picked, so retrying it here a couple of times is cheap and safe.
-            suggestions, result, last_error = [], None, None
-            for _attempt in range(RESEARCH_SUGGEST_ATTEMPTS):
-                try:
-                    result = ai_provider.complete_tier(
-                        "scholar", prompt, RESEARCH_SUGGEST_SYSTEM,
-                        preferred=state.research_backend, max_tokens=3000,
-                        download_root=state.download_root)
-                except ai_provider.ProviderError as exc:
-                    last_error = exc
-                    result = None
-                    continue
-                suggestions = ureca_mod.parse_suggest_response(result.get("text") or "")
-                if suggestions:
-                    break
-            if result is None:
-                self._send({"error": str(last_error)}, status=502)
+            professor_id = str(payload.get("professor") or "").strip()
+            professor = faculty_db.get(professor_id) if professor_id else None
+            if professor_id and professor is None:
+                self._send({"error": "unknown professor"}, status=400)
                 return
-            self._send({"suggestions": suggestions,
-                        "backend": result.get("backend"),
-                        "model": result.get("model")})
+            prompt = research_suggest_prompt(state, keywords, professor)
+            if payload.get("async"):
+                with state.lock:
+                    current = state.research_suggest_job
+                    if current and current.get("status") == "running":
+                        self._send({"error": "a research suggestion pass is already running"},
+                                   status=409)
+                        return
+                    job_id = uuid.uuid4().hex[:16]
+                    state.research_suggest_job = {
+                        "id": job_id, "status": "running", "done": False,
+                        "started_at": datetime.now(timezone.utc).isoformat(
+                            timespec="seconds"),
+                    }
+                threading.Thread(target=do_research_suggest,
+                                 args=(state, job_id, prompt, keywords, professor),
+                                 daemon=True).start()
+                with state.lock:
+                    job = dict(state.research_suggest_job)
+                self._send({"job": job}, status=202)
+                return
+            # Keep the synchronous response for small external clients that still
+            # use the original endpoint contract. The dashboard itself uses the
+            # async handoff above so it never waits on the provider over HTTP.
+            try:
+                self._send(generate_research_suggestions(state, prompt, keywords, professor))
+            except ai_provider.ProviderError as exc:
+                self._send({"error": str(exc)}, status=502)
             return
 
         if path == "/api/profile":
@@ -1965,7 +2960,8 @@ class Handler(BaseHTTPRequestHandler):
                 item.get("title") or "(untitled)", topic)
             try:
                 result = ai_provider.complete_tier(
-                    "scholar", prompt, URECA_DRAFT_SYSTEM, preferred=state.research_backend,
+                    "scholar", prompt, URECA_DRAFT_SYSTEM,
+                    preferred=research_tab_backend(state),
                     max_tokens=1800, download_root=state.download_root)
             except ai_provider.ProviderError as exc:
                 self._send({"error": str(exc)}, status=502)
@@ -2088,6 +3084,29 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"ok": True, "count": len(state.todo)})
             return
 
+        if path == "/api/focus":
+            # The Focus bar runs the timer client-side and posts one row when a
+            # stint finishes. Needs the dashboard session only, like "read" -
+            # no Blackboard token, works offline.
+            if payload.get("action") != "log":
+                self._send({"error": "unknown action"}, status=400)
+                return
+            try:
+                minutes = int(payload.get("minutes"))
+            except (TypeError, ValueError):
+                self._send({"error": "minutes must be an integer"}, status=400)
+                return
+            if not 1 <= minutes <= 180:
+                self._send({"error": "minutes out of range"}, status=400)
+                return
+            kind = str(payload.get("kind") or "focus")
+            if kind not in ("focus", "short_break", "long_break"):
+                self._send({"error": "invalid kind"}, status=400)
+                return
+            state.focus.log(minutes, kind, str(payload.get("task") or ""))
+            self._send({"ok": True, **state.focus.snapshot()})
+            return
+
         if path == "/api/announcements":
             action = payload.get("action")
             if action == "sync":
@@ -2119,9 +3138,45 @@ class Handler(BaseHTTPRequestHandler):
                                  daemon=True).start()
                 self._send({"ok": True})
                 return
+            if action == "purge":
+                # Collapse cross-posts in the stored feed now - no Blackboard
+                # token needed, so it works offline like "read" and "add".
+                folded = state.announcements.purge_duplicates()
+                state.note("Announcements purged: {} duplicate(s) folded".format(folded))
+                self._send({"ok": True, "folded": folded})
+                return
             if action == "read":
                 if not state.announcements.mark_read(str(payload.get("id") or ""),
                                                      bool(payload.get("read", True))):
+                    self._send({"error": "no such announcement"}, status=404)
+                    return
+                self._send({"ok": True})
+                return
+            if action == "add":
+                # A personal reminder - needs the dashboard session, not a
+                # Blackboard token, so it works offline like "read".
+                text = " ".join(str(payload.get("text") or "").split())
+                if not text:
+                    self._send({"error": "announcement text is required"}, status=400)
+                    return
+                if len(text) > 240:
+                    self._send({"error": "announcement text must be 240 characters or fewer"},
+                               status=400)
+                    return
+                priority = str(payload.get("priority") or "info")
+                if priority not in ("info", "warning", "urgent"):
+                    self._send({"error": "invalid priority"}, status=400)
+                    return
+                item = state.announcements.add_local(text, priority)
+                self._send({"ok": True, "id": item["id"]})
+                return
+            if action == "delete":
+                item_id = str(payload.get("id") or "")
+                if not item_id.startswith("local-"):
+                    self._send({"error": "only personal announcements can be deleted"},
+                               status=404)
+                    return
+                if not state.announcements.remove_local(item_id):
                     self._send({"error": "no such announcement"}, status=404)
                     return
                 self._send({"ok": True})
@@ -2239,6 +3294,58 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"ok": True, "job": job_id})
             return
 
+        if path == "/api/study/grade":
+            item_id = str(payload.get("id") or "").strip()
+            filename = os.path.basename(str(payload.get("filename") or "upload"))[:200]
+            if not item_id:
+                self._send({"error": "choose a material first"}, status=400)
+                return
+            if not drive.credentials_present():
+                self._send({"error": drive.SETUP_HELP}, status=400)
+                return
+            with state.lock:
+                item = next((entry for entry in state.drive_files
+                            if entry["id"] == item_id), None)
+            # Mirrors the frontend's own gate (only a Tutorial folder's material
+            # shows the Grade tab at all) so a direct API call can't bypass it -
+            # grading is scoped to weekly tutorial practice, not past-year exam
+            # papers, even though those also get a solution_pairs match.
+            if not item or not solution_pairs_mod.is_tutorial_material(
+                    item.get("rel_path") or ""):
+                self._send({"error": "Grading is only available for tutorial "
+                                     "material"}, status=400)
+                return
+            try:
+                raw_bytes, extension = validate_grade_upload(payload.get("data"))
+            except ValueError as exc:
+                self._send({"error": str(exc)}, status=400)
+                return
+            with state.lock:
+                if state.grading:
+                    self._send({"error": "a grading run is already in progress"},
+                               status=409)
+                    return
+                item = next((entry for entry in state.drive_files
+                            if entry["id"] == item_id), None)
+                material_name = (item or {}).get("rel_path") or (item or {}).get("name") or item_id
+                state.grading = True
+                job_id = uuid.uuid4().hex[:16]
+                state.grading_job = {
+                    "id": job_id, "document_id": item_id, "material_name": material_name,
+                    "work_filename": filename, "stage": "Queued",
+                    "ok": None, "done": False,
+                }
+            fd, work_path = tempfile.mkstemp(
+                prefix="intuition_grade_upload.", suffix=extension)
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw_bytes)
+            threading.Thread(
+                target=do_grade_tutorial,
+                args=(state, job_id, item_id, work_path, filename),
+                daemon=True).start()
+            self._send({"ok": True, "job": job_id})
+            return
+
         if path == "/api/study/summary/delete":
             summary_id = str(payload.get("id") or "").strip()
             if not summary_id:
@@ -2267,6 +3374,57 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 state.pushing = True
             threading.Thread(target=do_push, args=(state,), daemon=True).start()
+            self._send({"ok": True})
+            return
+
+        if path == "/api/drive/client-secret":
+            raw = payload.get("json")
+            if not isinstance(raw, str) or not raw.strip():
+                self._send({"error": "paste the downloaded OAuth client JSON"},
+                           status=400)
+                return
+            if len(raw) > 64 * 1024:
+                self._send({"error": "that file is too large to be an OAuth client JSON"},
+                           status=400)
+                return
+            verdict = drive.save_client_secret(raw)
+            if not verdict.get("ok"):
+                self._send({"error": verdict.get("problem") or "invalid client JSON"},
+                           status=400)
+                return
+            state.note("Drive OAuth client stored ({})".format(
+                verdict.get("project") or verdict.get("client_id") or "desktop app"))
+            self._send({"ok": True, "client_id": verdict.get("client_id"),
+                        "project": verdict.get("project")})
+            return
+
+        if path == "/api/drive/connect":
+            if not drive.credentials_present():
+                self._send({"error": drive.SETUP_HELP}, status=400)
+                return
+            with state.lock:
+                if state.drive_linking:
+                    self._send({"error": "a Drive authorisation is already in progress"},
+                               status=409)
+                    return
+                state.drive_linking = True
+                state.drive_link_error = ""
+            threading.Thread(target=do_drive_link, args=(state,), daemon=True).start()
+            self._send({"ok": True})
+            return
+
+        if path == "/api/drive/disconnect":
+            with state.lock:
+                linking = state.drive_linking
+            if linking:
+                self._send({"error": "a Drive authorisation is in progress"}, status=409)
+                return
+            drive.disconnect()
+            with state.lock:
+                state.drive_files = []
+                state.external_drive_files = {}
+                state.drive_link_error = ""
+            state.note("Drive disconnected")
             self._send({"ok": True})
             return
 
@@ -2324,14 +3482,38 @@ class Handler(BaseHTTPRequestHandler):
                         "engine": "Google Drive content index"})
             return
 
+        if path == "/api/drive/search_mydrive":
+            if not drive.credentials_present():
+                self._send({"error": drive.SETUP_HELP}, status=400)
+                return
+            query = str(payload.get("query") or "").strip()[:200]
+            if not query:
+                self._send({"error": "query must not be empty"}, status=400)
+                return
+            try:
+                service = drive.build_service(interactive=False)
+                results = drive.search_my_drive(service, query)
+            except drive.DriveError as exc:
+                self._send({"error": str(exc)}, status=400)
+                return
+            except Exception as exc:  # noqa: BLE001 - report Drive search failures
+                state.note("Drive search (My Drive) failed: {}".format(exc))
+                self._send({"error": "Drive search failed"}, status=500)
+                return
+            with state.lock:
+                state.external_drive_files.update({f["id"]: f for f in results})
+                state.drive_files = _merge_external_drive_files(state, state.drive_files)
+            self._send({"files": results})
+            return
+
         if path == "/api/drive/learn":
             item_id = str(payload.get("id") or "")
             session_id = str(payload.get("session") or "default")[:80]
             question = str(payload.get("question") or "").strip()[:2000]
-            snapshot = str(payload.get("snapshot") or "")
-            if snapshot and (not snapshot.startswith("data:image/jpeg;base64,")
-                             or len(snapshot) > 3_000_000):
-                self._send({"error": "snapshot must be a JPEG under 2 MB"}, status=400)
+            try:
+                snapshot = validate_learning_snapshot(payload.get("snapshot"))
+            except ValueError as exc:
+                self._send({"error": str(exc)}, status=400)
                 return
             if not item_id or not question:
                 self._send({"error": "choose a material and enter a question"}, status=400)
@@ -2343,7 +3525,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send({"error": "material is not in the current Drive index"}, status=404)
                 return
             try:
-                history = state.chat_memory.recent(session_id, item_id, limit=8)
+                try:
+                    history = state.chat_memory.recent(session_id, item_id, limit=8)
+                except Exception as memory_exc:  # noqa: BLE001 - answer even if local history is damaged
+                    state.note("FRIDAY chat history unavailable: {}".format(memory_exc))
+                    history = []
                 service = drive.build_service(interactive=False)
                 with tempfile.TemporaryDirectory(prefix="intuition-learn-") as tmp:
                     target = drive.pull_file(service, item, tmp)
@@ -2359,23 +3545,37 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         result = omniroute_provider.complete_image(
                             prompt, DRIVE_LEARNING_SYSTEM, snapshot,
-                            max_tokens=900, timeout=180)
-                    except omniroute_provider.OmniRouteError as vision_exc:
+                            max_tokens=FRIDAY_MAX_TOKENS, timeout=180)
+                    except Exception as vision_exc:  # noqa: BLE001 - text fallback keeps vision failures non-fatal
                         state.note("FRIDAY vision unavailable: {}".format(vision_exc))
                         snapshot_note = "Snapshot vision is temporarily unavailable. FRIDAY answered from the document text instead."
                         result = ai_provider.complete_tier(
                             "chat",
                             prompt + "\n\nThe selected snapshot could not be decoded by the vision provider. Answer from the extracted material and state briefly if the requested visual detail cannot be verified.",
                             DRIVE_LEARNING_SYSTEM, preferred=state.research_backend,
-                            max_tokens=900, download_root=state.download_root)
+                            max_tokens=FRIDAY_MAX_TOKENS, download_root=state.download_root)
                 else:
                     result = ai_provider.complete_tier(
                         "chat", prompt, DRIVE_LEARNING_SYSTEM, preferred=state.research_backend,
-                        max_tokens=900, download_root=state.download_root)
+                        max_tokens=FRIDAY_MAX_TOKENS, download_root=state.download_root)
                 answer = result.get("text") or ""
-                state.chat_memory.add(session_id, item_id, "user", question)
-                state.chat_memory.add(session_id, item_id, "assistant", answer,
-                                      result.get("backend"), result.get("model"))
+                if not answer.strip():
+                    raise RuntimeError("FRIDAY returned an empty answer")
+                # The chat surfaces' budget is generous but finite, and the system
+                # prompt invites the model to expand well past its 450-word default
+                # when a student asks for depth (tables, several worked examples,
+                # flashcards). Silently returning a reply chopped mid-sentence is
+                # worse than telling the reader it was cut off - matches the
+                # truncation check summary.py's _extract_body already does for
+                # Compendium, applied here instead of failing the whole answer.
+                if result.get("finish_reason") in _FRIDAY_TRUNCATED_FINISH_REASONS:
+                    answer += "\n\n*(Answer cut off by length limit - ask to continue for more.)*"
+                try:
+                    state.chat_memory.add(session_id, item_id, "user", question)
+                    state.chat_memory.add(session_id, item_id, "assistant", answer,
+                                          result.get("backend"), result.get("model"))
+                except Exception as memory_exc:  # noqa: BLE001 - local memory must not discard a valid answer
+                    state.note("FRIDAY chat memory unavailable: {}".format(memory_exc))
                 self._send({"answer": answer, "backend": result.get("backend"),
                             "model": result.get("model"), "memory": "local",
                             "snapshot_note": snapshot_note})
@@ -2386,6 +3586,11 @@ class Handler(BaseHTTPRequestHandler):
         if not state.token:
             self._send({"error": "no session token"}, status=401)
             return
+        with state.lock:
+            if state.session_rejected:
+                self._send({"error": "session rejected; paste a fresh BbRouter cookie"},
+                           status=401)
+                return
 
         if path == "/api/sync":
             with state.lock:
@@ -2399,13 +3604,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/courses":
+            token, generation = state.session_snapshot()
             try:
                 courses = get_courses(
-                    state.token, prefer_rest=state.prefer_rest,
+                    token, prefer_rest=state.prefer_rest,
                     scope=state.scope, download_root=state.download_root,
                 )
             except Exception as e:  # noqa: BLE001
                 self._send({"error": str(e)}, status=500)
+                return
+            if not state.session_current(token, generation):
+                self._send({"error": "session changed while loading courses"}, status=409)
                 return
             with state.lock:
                 state.courses = [{"name": n, "id": i} for n, i in courses]
@@ -2432,9 +3641,10 @@ class Handler(BaseHTTPRequestHandler):
                 state.scanning = True
                 state.scan_errors = []
                 state.log.append("Starting scan")
+            token, generation = state.session_snapshot()
             threading.Thread(
                 target=do_scan,
-                args=(state, payload.get("course_ids", [])),
+                args=(state, payload.get("course_ids", []), token, generation),
                 daemon=True,
             ).start()
             self._send({"ok": True})
@@ -2446,8 +3656,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._send({"error": "already downloading"}, status=409)
                     return
                 state.downloading = True
+            token, generation = state.session_snapshot()
             threading.Thread(
-                target=do_download, args=(state, payload.get("paths", [])), daemon=True
+                target=do_download,
+                args=(state, payload.get("paths", []), token, generation), daemon=True
             ).start()
             self._send({"ok": True})
             return
@@ -2513,10 +3725,17 @@ def serve(download_root: str, port: int = DEFAULT_PORT, prefer_rest: bool = True
     # Bind the local listener before starting optional background integrations. A slow
     # or broken Outlook/Drive/OmniRoute probe must never delay dashboard availability.
     server = ThreadingHTTPServer((DEFAULT_HOST, port), Handler)
+    server.daemon_threads = True
+    service_stop = threading.Event()
     threading.Thread(target=Handler.state.refresh_identity, daemon=True).start()
+    # Probe the Claude CLI version once, up front. snapshot() reads it on every
+    # /api/state poll; doing it here keeps that subprocess off the request path.
+    threading.Thread(target=research_mod.warm_cli_version, daemon=True).start()
     threading.Thread(target=announcement_sync_scheduler, args=(Handler.state,),
+                     kwargs={"stop": service_stop},
                      daemon=True).start()
     threading.Thread(target=inbound_poll_scheduler, args=(Handler.state,),
+                     kwargs={"stop": service_stop},
                      daemon=True).start()
     threading.Thread(target=sweep_old_summaries,
                      args=(Handler.state, summary_retention_days), daemon=True).start()
@@ -2525,10 +3744,9 @@ def serve(download_root: str, port: int = DEFAULT_PORT, prefer_rest: bool = True
     if drive.credentials_present() and drive.token_present():
         Handler.state.drive_listing = True
         threading.Thread(target=do_drive_list, args=(Handler.state,), daemon=True).start()
-    omniroute_stop = threading.Event()
     if omniroute_provider.managed_locally():
         threading.Thread(target=omniroute_watchdog,
-                         args=(Handler.state, omniroute_stop), daemon=True).start()
+                         args=(Handler.state, service_stop), daemon=True).start()
     url = "http://{}:{}/".format(DEFAULT_HOST, port)
     print("iNTUition: {}".format(url))
     print("Staging to:  {}".format(Handler.state.download_root))
@@ -2549,8 +3767,9 @@ def serve(download_root: str, port: int = DEFAULT_PORT, prefer_rest: bool = True
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
-        omniroute_stop.set()
+        service_stop.set()
         server.shutdown()
+        server.server_close()
 
 
 def main():

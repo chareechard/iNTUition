@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -248,14 +249,35 @@ def cli_present() -> bool:
 
 
 _cli_version_cache: Dict[str, Optional[str]] = {}
+# Serialises the `claude --version` probe. status() sits on the /api/state hot
+# path, which the dashboard polls roughly once a second; without this a slow or
+# wedged CLI shim would let every poll spawn its own subprocess and block its
+# request thread (and, under keep-alive, whatever the browser pipelines behind
+# it - including POST /api/token) for the length of the timeout below.
+_cli_version_lock = threading.Lock()
 
 
 def cli_version() -> Optional[str]:
-    """Cached: the dashboard polls status twice a second and this spawns a process."""
+    """The CLI's version string, probed at most once and never on a hot request.
+
+    Returns ``None`` until the one background probe has finished (the value is
+    cosmetic - ``ready`` never depends on it), and never spawns a subprocess from
+    the calling thread."""
     if CLI_BINARY in _cli_version_cache:
         return _cli_version_cache[CLI_BINARY]
-    _cli_version_cache[CLI_BINARY] = _read_cli_version()
-    return _cli_version_cache[CLI_BINARY]
+    if not _cli_version_lock.acquire(blocking=False):
+        return None  # a probe is already in flight; don't pile on
+    try:
+        if CLI_BINARY not in _cli_version_cache:
+            _cli_version_cache[CLI_BINARY] = _read_cli_version()
+        return _cli_version_cache[CLI_BINARY]
+    finally:
+        _cli_version_lock.release()
+
+
+def warm_cli_version() -> None:
+    """Run the version probe once, off any request thread (call at startup)."""
+    cli_version()
 
 
 def _read_cli_version() -> Optional[str]:
@@ -263,11 +285,11 @@ def _read_cli_version() -> Optional[str]:
         return None
     try:
         out = subprocess.run([CLI_BINARY, "--version"], capture_output=True, text=True,
-                             timeout=20, creationflags=claude_bridge.no_window())
+                             timeout=5, creationflags=claude_bridge.no_window())
     except (OSError, subprocess.SubprocessError):
         return None
     # "2.1.225 (Claude Code)" -> "2.1.225"; the UI already says which CLI this is.
-    return ((out.stdout or "").strip().split() or [None])[0]
+    return ((out.stdout or "").strip().split() or [""])[0]
 
 
 def sandbox_dir(download_root: str) -> str:

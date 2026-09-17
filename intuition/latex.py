@@ -166,6 +166,8 @@ def lint(body: str) -> List[str]:
     tabular_depth = 0     # nesting of tabular-like environments
     dollar_count = 0
     last_dollar_line = 0
+    brace_open_lines: List[int] = []   # line of each so-far-unmatched '{'
+    extra_close_line = 0               # first '}' seen with no open '{' to match
     line_no = 1
     i, n = 0, len(body)
     while i < n:
@@ -229,12 +231,37 @@ def lint(body: str) -> List[str]:
             violations.append(
                 "line {}: unescaped {} outside math mode - use \\{} for a "
                 "literal {}".format(line_no, name, ch, name))
+        elif ch == "{":
+            # A literal brace is \{ - already consumed above as a two-char escape -
+            # so every bare { here is a real TeX group opener and must be closed.
+            brace_open_lines.append(line_no)
+        elif ch == "}":
+            if brace_open_lines:
+                brace_open_lines.pop()
+            elif not extra_close_line:
+                extra_close_line = line_no
         i += 1
 
     if dollar_count % 2 == 1:
         violations.append(
             "line {}: an odd number of unescaped $ - inline math looks unclosed, "
             "or a literal dollar sign needs \\$".format(last_dollar_line))
+
+    # Unbalanced braces surface at compile only as a fatal, near-unlocatable
+    # sectioning error ("Argument of \\H@old@sect has an extra }") that names the
+    # \\par after the heading, not the stray brace. Catching it here names the line
+    # and lets the cheaper lint-repair turn fix it before a compile is spent.
+    if extra_close_line:
+        violations.append(
+            "line {}: a closing brace with no matching opening brace - a section "
+            "heading or command argument is unbalanced; pdflatex reports this only "
+            "as a fatal sectioning error, so fix the brace here".format(
+                extra_close_line))
+    elif brace_open_lines:
+        violations.append(
+            "line {}: an opening brace is never closed ({} more opening than "
+            "closing braces in the body) - a command argument or group runs past "
+            "its end".format(brace_open_lines[-1], len(brace_open_lines)))
 
     return violations
 
@@ -266,6 +293,14 @@ def extract_errors(log: str, context_lines: int = 2) -> List[str]:
     for i, line in enumerate(lines):
         if line.startswith("! "):
             block = lines[i:i + 1 + context_lines]
+            # TeX prints the offending source line as "l.<n> ..." - for an "extra }"
+            # / "Missing } inserted" error it lands a few lines below the "! ", past
+            # the default window, and it is the only part that locates the fault.
+            if not any(ln.lstrip().startswith("l.") for ln in block):
+                for ln in lines[i + 1 + context_lines:i + 8]:
+                    if ln.lstrip().startswith("l."):
+                        block = block + ["...", ln]
+                        break
             out.append("\n".join(block).strip())
     return out
 
@@ -288,6 +323,11 @@ def compile(document: str, figures: Optional[List[bytes]] = None,
     the whole compile, since a caller that over-requested a figure just gets a missing
     image on that page, not a lost summary.
     """
+    def output_text(value: object) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value or "")
+
     status = tooling_status()
     if not status["ready"]:
         return CompileResult(
@@ -305,8 +345,8 @@ def compile(document: str, figures: Optional[List[bytes]] = None,
                    else "jpg" if data.startswith(b"\xff\xd8\xff") else None)
             if not ext:
                 continue
-            with open(os.path.join(tmp, "fig{}.{}".format(index, ext)), "wb") as f:
-                f.write(data)
+            with open(os.path.join(tmp, "fig{}.{}".format(index, ext)), "wb") as figure_file:
+                figure_file.write(data)
 
         env = dict(os.environ)
         env["openin_any"] = "p"
@@ -324,7 +364,7 @@ def compile(document: str, figures: Optional[List[bytes]] = None,
             proc = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True,
                                   text=True, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            log = (exc.stdout or "") + (exc.stderr or "")
+            log = output_text(exc.stdout) + output_text(exc.stderr)
             return CompileResult(
                 ok=False, pdf=None, tex=document, log=log,
                 errors=["Compile timed out after {}s.".format(timeout)])
@@ -344,11 +384,11 @@ def compile(document: str, figures: Optional[List[bytes]] = None,
                 # The first pass already produced a usable PDF - references may read
                 # "??" but a document that compiled once is still better delivered
                 # than dropped over a second pass timing out.
-                log += (exc.stdout or "") + (exc.stderr or "")
+                log += output_text(exc.stdout) + output_text(exc.stderr)
 
         if proc.returncode == 0 and os.path.isfile(pdf_path):
-            with open(pdf_path, "rb") as f:
-                pdf_bytes = f.read()
+            with open(pdf_path, "rb") as pdf_file:
+                pdf_bytes = pdf_file.read()
             return CompileResult(ok=True, pdf=pdf_bytes, tex=document, log=log, errors=[])
 
         errors = extract_errors(log) or ["pdflatex exited {} with no '! ' error line "

@@ -8,10 +8,15 @@ directly testable in Chrome.
 
 ```powershell
 python -m pip install -e ".[desktop]"
-python -m intuition.desktop --browser
+python -m intuition.desktop
 ```
 
-Remove `--browser` to open the WebView2 desktop window.
+This is the daily development workflow: it runs the editable source tree in the
+desktop WebView. The browser alternative is useful when inspecting the page in Chrome:
+
+```powershell
+python -m intuition.desktop --browser
+```
 
 ## Where to test a change
 
@@ -38,8 +43,8 @@ looking at a stale build, not a bug.
 ## One-directory build
 
 ```powershell
-python tools\build.py            # test -> package -> verify -> smoke
-python tools\build.py --clean    # discard build\ and dist\ first
+python tools\build.py            # test -> cached package -> verify -> smoke
+python tools\build.py --clean    # full release-style rebuild
 ```
 
 Each step can invalidate the next, hence the order. The verify step re-checks that the
@@ -47,8 +52,19 @@ bundle actually matches the working tree rather than trusting that PyInstaller c
 what it was told to; the smoke step runs the frozen executable via `--diagnostics`,
 which exercises the packaged runtime and exits without opening a window.
 
+Normal builds reuse PyInstaller's analysis cache, so they are suitable for occasional
+packaged checkpoints while editing. Use `--clean` after changing dependencies, the
+spec, or packaging assets, and for the final release build.
+
 `--skip-tests` and `--no-smoke` narrow the loop while iterating on packaging itself.
-`.\packaging\build-desktop.ps1 -Clean` remains as the bare PyInstaller invocation.
+`.\packaging\build-desktop.ps1 -Clean` is a PowerShell wrapper around the same
+canonical build, so both entry points run the freshness check and packaged-runtime
+smoke test.
+
+The spec detects optional packages at build time. A desktop-only install can build the
+core dashboard without Drive or Playwright; installing those feature groups before a
+build adds their dynamically imported modules to the bundle. The public faculty
+catalogue is bundled with the desktop build as well.
 
 To ask whether the current build is current, without rebuilding:
 
@@ -65,6 +81,10 @@ after it has already cleared the previous output — leaving `dist\iNTUition` in
 
 The executable is written to `dist\iNTUition\iNTUition.exe`. Keep the entire
 `dist\iNTUition` directory together; this is intentionally not a one-file build.
+For publication, zip that directory (or place it behind an installer) and publish the
+source repository alongside it. Future edits happen in `intuition/` and are reflected
+in a new build; the executable itself remains an immutable snapshot of the source at
+the time it was built.
 
 ## Diagnostics
 

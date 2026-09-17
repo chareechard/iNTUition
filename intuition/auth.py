@@ -8,13 +8,15 @@ it expires.
 
 The BbRouter cookie is a comma separated list of ``key:value`` pairs, e.g.::
 
-    expires:<timestamp>,id:<session-id>,signature:<signature>,site:<site-id>,
-    timeout:10800,user:<user-id>,v:2,xsrf:<token>
+    expires:1786304238,id:E835...,signature:df7b...,site:5ecaf6aa-...,
+    timeout:10800,user:6itk...,v:2,xsrf:2cc991e0-...
 
 An unauthenticated (anonymous) BbRouter has no ``user`` field.
 """
 import json
 import os
+import re
+import tempfile
 import time
 from typing import Dict, Optional
 
@@ -63,9 +65,22 @@ def parse_bbrouter(BbRouter: str) -> Dict[str, str]:
     return fields
 
 
+def _cookie_value(value: str) -> str:
+    """Extract a BbRouter value from common browser copy formats."""
+    value = value.strip().strip('"').strip("'").strip()
+    if value.lower().startswith("cookie:"):
+        value = value.split(":", 1)[1].strip()
+    match = re.search(r"(?:^|;)\s*bbrouter\s*=\s*([^;]+)", value, re.IGNORECASE)
+    if match:
+        return match.group(1).strip().strip('"').strip("'").strip()
+    if value.lower().startswith("bbrouter="):
+        value = value[len("bbrouter="):].strip()
+    return value.rstrip(";").strip().strip('"').strip("'").strip()
+
+
 def is_authenticated(BbRouter: str) -> bool:
     """A BbRouter is only useful if it carries a ``user`` field."""
-    if not BbRouter:
+    if not isinstance(BbRouter, str) or not BbRouter:
         return False
     return "user" in parse_bbrouter(BbRouter)
 
@@ -92,15 +107,9 @@ def is_expired(BbRouter: str, now: Optional[float] = None) -> bool:
 
 def validate(BbRouter: str) -> str:
     """Return the token if it is usable, otherwise raise AuthenticationError."""
-    if not BbRouter or not BbRouter.strip():
+    if not isinstance(BbRouter, str) or not BbRouter.strip():
         raise AuthenticationError("No BbRouter token supplied.\n\n" + HOW_TO_GET_TOKEN)
-    BbRouter = BbRouter.strip().strip('"').strip("'")
-    # Copying from the Network tab's Cookie header (or from document.cookie) yields
-    # the pair, not the bare value.  Left alone it parses into a bogus leading field
-    # and rides along into the Cookie header, so the token is silently useless.
-    if BbRouter.lower().startswith("bbrouter="):
-        BbRouter = BbRouter[len("bbrouter="):].strip()
-    BbRouter = BbRouter.rstrip(";").strip()
+    BbRouter = _cookie_value(BbRouter)
     if not is_authenticated(BbRouter):
         raise AuthenticationError(
             "BbRouter has no 'user' field, it is an anonymous session token.\n\n"
@@ -120,8 +129,18 @@ def save_token(BbRouter: str, path: str = DEFAULT_TOKEN_PATH) -> str:
     directory = os.path.dirname(path)
     if directory and not os.path.isdir(directory):
         os.makedirs(directory, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump({"BbRouter": BbRouter}, f)
+    fd, temporary = tempfile.mkstemp(prefix=".session-", suffix=".tmp", dir=directory or None)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"BbRouter": BbRouter}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -137,11 +156,12 @@ def load_token(path: str = DEFAULT_TOKEN_PATH) -> Optional[str]:
     try:
         with open(path, "r") as f:
             BbRouter = json.load(f).get("BbRouter")
-    except (ValueError, OSError):
+    except (AttributeError, TypeError, ValueError, OSError):
         return None
-    if not BbRouter or not is_authenticated(BbRouter) or is_expired(BbRouter):
+    try:
+        return validate(BbRouter)
+    except AuthenticationError:
         return None
-    return BbRouter
 
 
 def resolve(
@@ -174,3 +194,4 @@ def resolve(
     raise AuthenticationError(
         "No valid cached session found.\n\n" + HOW_TO_GET_TOKEN
     )
+

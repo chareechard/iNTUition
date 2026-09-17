@@ -89,13 +89,25 @@ def run_tests() -> bool:
     return result.returncode == 0
 
 
+def run_typecheck() -> bool:
+    result = subprocess.run([sys.executable, "-m", "mypy", "intuition"],
+                            cwd=HERE)
+    return result.returncode == 0
+
+
 def run_pyinstaller(clean: bool) -> bool:
     if clean:
         for path in (os.path.join(WORK, "intuition"), os.path.join(DIST, "iNTUition")):
             shutil.rmtree(path, ignore_errors=True)
-    result = subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm",
-                             "--clean", "--distpath", DIST, "--workpath", WORK, SPEC],
-                            cwd=HERE)
+    command = [sys.executable, "-m", "PyInstaller", "--noconfirm",
+               "--distpath", DIST, "--workpath", WORK]
+    # Keep PyInstaller's analysis cache for ordinary edit/build cycles. A clean
+    # build remains available for release checkpoints or after dependency/spec
+    # changes, but should not be the cost of every local iteration.
+    if clean:
+        command.append("--clean")
+    command.append(SPEC)
+    result = subprocess.run(command, cwd=HERE)
     return result.returncode == 0
 
 
@@ -109,10 +121,16 @@ def smoke() -> bool:
     if not os.path.exists(EXE):
         print("      no executable to smoke test")
         return False
-    with tempfile.TemporaryDirectory() as tmp:
-        target = os.path.join(tmp, "smoke-diagnostics.zip")
+    fd, target = tempfile.mkstemp(prefix="intuition-smoke-", suffix=".zip")
+    os.close(fd)
+    os.remove(target)
+    try:
         try:
-            result = subprocess.run([EXE, "--diagnostics", target], timeout=180)
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(
+                [EXE, "--diagnostics", target], timeout=180,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, creationflags=creationflags)
         except subprocess.TimeoutExpired:
             print("      executable did not exit within 180s")
             return False
@@ -129,6 +147,11 @@ def smoke() -> bool:
             return False
         print("      {} {} (frozen, python {})".format(
             report.get("app"), report.get("version"), report.get("python")))
+    finally:
+        try:
+            os.remove(target)
+        except OSError:
+            pass
     return True
 
 
@@ -139,7 +162,10 @@ def main(argv) -> int:
     parser.add_argument("--clean", action="store_true")
     args = parser.parse_args(argv)
 
-    steps = [("Test suite", run_tests)] if not args.skip_tests else []
+    steps = []
+    if not args.skip_tests:
+        steps.extend([("Test suite", run_tests),
+                      ("Static type check", run_typecheck)])
     steps.append(("Preflight: dist/ not locked", preflight))
     steps.append(("Package (PyInstaller)", lambda: run_pyinstaller(args.clean)))
     steps.append(("Verify bundle matches source", verify_fresh))

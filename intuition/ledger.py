@@ -15,7 +15,9 @@ Stored as JSON next to the download root so it travels with the folder it descri
 """
 import json
 import os
+import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
@@ -45,7 +47,7 @@ class Ledger:
     def __init__(self, download_root: str):
         self.download_root = download_root
         self.path = ledger_path(download_root)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.entries: Dict[str, Dict] = {}
         self._by_source: Dict[str, str] = {}
         self.load()
@@ -58,9 +60,19 @@ class Ledger:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Tolerate an older/corrupt file rather than losing the whole run.
-            self.entries = data if isinstance(data, dict) else {}
-        except (ValueError, OSError):
+            if not isinstance(data, dict):
+                raise ValueError("ledger root must be an object")
+            self.entries = {
+                str(key): value for key, value in data.items()
+                if isinstance(value, dict)
+            }
+        except (TypeError, ValueError, OSError):
+            # Preserve evidence instead of silently destroying the only archive index.
+            try:
+                corrupt = "{}.corrupt-{}".format(self.path, int(time.time()))
+                os.replace(self.path, corrupt)
+            except OSError:
+                pass
             self.entries = {}
         self._reindex()
 
@@ -73,14 +85,23 @@ class Ledger:
                 self._by_source[source] = key
 
     def save(self):
-        directory = os.path.dirname(self.path)
-        if directory and not os.path.isdir(directory):
-            os.makedirs(directory, exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.entries, f, indent=1, sort_keys=True)
-        # Atomic-ish replace so an interrupted write cannot truncate the ledger.
-        os.replace(tmp, self.path)
+        with self._lock:
+            directory = os.path.dirname(self.path)
+            if directory and not os.path.isdir(directory):
+                os.makedirs(directory, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".drive-ledger-", suffix=".tmp",
+                                       dir=directory or None)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(self.entries, f, indent=1, sort_keys=True)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, self.path)
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     @staticmethod
     def key(rel_path: str) -> str:

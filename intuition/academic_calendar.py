@@ -82,6 +82,8 @@ class Semester:
         out = []
         for w in range(1, TOTAL_TEACHING_WEEKS + 1):
             monday = self.monday_of(w)
+            if monday is None:
+                continue
             out.append({"week": w, "monday": monday.isoformat(),
                         "friday": (monday + timedelta(days=4)).isoformat()})
         return out

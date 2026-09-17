@@ -1,16 +1,15 @@
 import math
 import os
 import re
-import shutil
 import unicodedata
 import hashlib
 import urllib.parse
-from pathlib import Path
+import uuid
 from typing import Optional, Tuple, Callable
 
 import requests
 from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+from urllib3.util.retry import Retry
 
 # (connect, read) seconds shared by every non-streaming Learn request. Without a
 # bound, a slow or lossy path to Learn leaves the request hanging indefinitely - the
@@ -22,7 +21,8 @@ REQUEST_TIMEOUT = (10, 30)
 def is_download_link(url):
     """ 
     Examples of download links:
-    https://example.invalid/bbcswebdav/pid-0-dt-content-rid-0/xid-0 example.pdf
+    https://ntulearn.ntu.edu.sg/bbcswebdav/pid-1875199-dt-content-rid-9478986_1/xid-9478986_1 Tut1_CE2003
+    https://ntulearn.ntu.edu.sg/bbcswebdav/pid-1875199-dt-content-rid-9478990_1/xid-9478990_1 Tut2_CE2003
     """
     pattern = r"bbcswebdav\/pid-\d+-dt-content-rid-\d+"
     return re.search(pattern, url) is not None
@@ -81,9 +81,11 @@ def make_GET_request(BbRouter, path, params=None):
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    return requests.get(
+    response = requests.get(
         path, headers=headers, cookies=cookies, params=params, timeout=REQUEST_TIMEOUT
     )
+    response.raise_for_status()
+    return response
 
 
 def is_rest_download_link(url: str) -> bool:
@@ -227,7 +229,8 @@ def shorten_path_for_disk(root: str, rel_path: str, max_folder_path: int = MAX_F
 
 
 def download(
-    BbRouter: str, url: str, destination: str, callback: Callable[[int, Optional[int]], None] = None
+    BbRouter: str, url: str, destination: str,
+    callback: Optional[Callable[[int, Optional[int]], None]] = None,
 ) -> bool:
     """download file, redirects will be involved. Even though download is invokes from a file object
     that has a name, the downloaded file name will be used instead
@@ -258,6 +261,8 @@ def download(
 
     # if directory does not exist then create it
     dir_path = os.path.dirname(destination)
+    if not dir_path:
+        dir_path = "."
     if not os.path.isdir(dir_path):
         os.makedirs(dir_path, exist_ok=True)
 
@@ -266,27 +271,49 @@ def download(
 
 
     session = requests.Session()
-    retry = Retry(connect=5, backoff_factor=0.5)
+    retry = Retry(
+        connect=5,
+        read=3,
+        status=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        raise_on_status=False,
+    )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
 
-    with open(destination, "wb") as f:
+    part = os.path.join(
+        os.path.dirname(destination),
+        ".{}{}.part".format(os.path.basename(destination), uuid.uuid4().hex),
+    )
+    try:
         with session.get(
-            url, allow_redirects=True, stream=True, cookies=cookies, headers=headers
+            url, allow_redirects=True, stream=True, cookies=cookies,
+            headers=headers, timeout=REQUEST_TIMEOUT,
         ) as response:
-            if callback:
-                total_length_str = response.headers.get("content-length")
-                total_length = int(total_length_str) if total_length_str is not None else None
-                dl = 0
-                with open(destination, "wb") as f:
-                    for data in response.iter_content(chunk_size=1024):
-                        dl += len(data)
-                        f.write(data)
+            response.raise_for_status()
+            total_length_str = response.headers.get("content-length")
+            try:
+                total_length = int(total_length_str) if total_length_str else None
+            except ValueError:
+                total_length = None
+            dl = 0
+            with open(part, "wb") as output:
+                for data in response.iter_content(chunk_size=1024 * 1024):
+                    if not data:
+                        continue
+                    dl += len(data)
+                    output.write(data)
+                    if callback:
                         callback(dl, total_length)
-
-            else:
-                shutil.copyfileobj(response.raw, f)
+        os.replace(part, destination)
+    finally:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
 
     return True
 
@@ -316,11 +343,15 @@ def has_ext(url: str) -> bool:
 
 
 def get_video_download_size(url: str) -> Optional[str]:
-    res = requests.head(url, allow_redirects=True)
+    res = requests.head(url, allow_redirects=True, timeout=REQUEST_TIMEOUT)
+    res.raise_for_status()
 
     size = res.headers.get("Content-Length")
     if size:
-        return convert_size(int(size))
+        try:
+            return convert_size(int(size))
+        except (TypeError, ValueError):
+            return None
     return None
 
 

@@ -7,6 +7,8 @@ import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from intuition.persistence import atomic_json_dump
+
 STORAGE_DIR = ".intuition"
 FILENAME = "todo.json"
 DIRECTIONS = ("push", "pull")
@@ -31,7 +33,7 @@ def _now() -> str:
 class Queue:
     def __init__(self, download_root: str):
         self.path = queue_path(download_root)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.items: List[Dict] = []
         self.load()
 
@@ -46,12 +48,8 @@ class Queue:
             self.items = []
 
     def save(self):
-        directory = os.path.dirname(self.path)
-        os.makedirs(directory, exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"items": self.items}, f, indent=1)
-        os.replace(tmp, self.path)
+        with self._lock:
+            atomic_json_dump(self.path, {"items": self.items}, indent=1)
 
     def add(self, title: str, direction: str = "push", priority: str = "normal",
             details: str = "", course: str = "") -> Dict:
@@ -123,7 +121,7 @@ class Queue:
                 "id": "ntu-" + source_id.strip("_")[:40],
                 "source": "ntulearn", "source_id": source_id,
                 "title": title[:200], "details": details,
-                "course": course_code(source.get("course")),
+                "course": course_code(str(source.get("course") or "")),
                 "direction": "pull", "priority": "high",
                 "status": "open", "created": now, "updated": now,
             }
@@ -150,8 +148,8 @@ class Queue:
         status_order = {"in_progress": 0, "open": 1, "done": 2}
         priority_order = {"high": 0, "normal": 1, "low": 2}
         items = sorted(self.items, key=lambda i: i.get("updated", ""), reverse=True)
-        items.sort(key=lambda i: (status_order.get(i.get("status"), 9),
-                                  priority_order.get(i.get("priority"), 9)))
+        items.sort(key=lambda i: (status_order.get(str(i.get("status") or ""), 9),
+                                  priority_order.get(str(i.get("priority") or ""), 9)))
         counts = {status: sum(i.get("status") == status for i in self.items)
                   for status in STATUSES}
         return {"items": items, "counts": counts}

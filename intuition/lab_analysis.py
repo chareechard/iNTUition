@@ -12,7 +12,7 @@ timeline, so the model is additionally asked to report the operation trace
 import json
 import math
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 MAX_CRITICAL_LINES = 8
 MAX_STEPS = 300
@@ -53,7 +53,7 @@ def _text(value: object, default: str = "") -> str:
 
 def _line_number(value: object, line_count: int) -> Optional[int]:
     try:
-        line = int(value)
+        line = int(str(value))
     except (TypeError, ValueError):
         return None
     if line < 1 or (line_count and line > line_count):
@@ -172,14 +172,15 @@ def _steps(value: object, line_count: int, model: Dict) -> List[Dict]:
         return []
     graph_ids = _graph_ids(state) if kind in ("graph", "tree") else set()
     graph_edges = _graph_edges(state) if kind in ("graph", "tree") else set()
-    out = []
+    state_list = state if isinstance(state, list) else []
+    out: List[Dict[str, Any]] = []
     for item in value[:MAX_STEPS]:
         if not isinstance(item, dict):
             continue
         op = str(item.get("op") or "").strip().lower()
         if op not in STEP_OPS:
             continue
-        step = {"op": op}
+        step: Dict[str, Any] = {"op": op}
         indices = item.get("indices")
         if kind == "array":
             if op not in ("compare", "swap", "set") or not isinstance(indices, list):
@@ -188,7 +189,7 @@ def _steps(value: object, line_count: int, model: Dict) -> List[Dict]:
             if len(indices) != required:
                 continue
             clean = [_integer_index(i) for i in indices]
-            if (any(i is None or i < 0 or i >= len(state) for i in clean) or
+            if (any(i is None or i < 0 or i >= len(state_list) for i in clean) or
                     (op == "set" and (
                         "value" not in item or
                         isinstance(item.get("value"), bool) or
@@ -223,6 +224,32 @@ def _steps(value: object, line_count: int, model: Dict) -> List[Dict]:
             step["value"] = item["value"]
         out.append(step)
     return out
+
+
+MAX_DRIVER_CHARS = 4000
+MAX_DRIVER_LINES = 80
+
+
+def parse_entrypoint_response(raw_text: str) -> Optional[str]:
+    """The model's answer to ``LAB_ENTRYPOINT_SYSTEM`` - just the driver
+    snippet, or None when the model declined or the response doesn't fit the
+    contract. Never raises; this is untrusted model output about to be
+    appended to a student's own file, so it is checked, not trusted."""
+    data = _extract_json(raw_text) or {}
+    driver = data.get("driver")
+    if not isinstance(driver, str):
+        return None
+    driver = driver.strip("\n")
+    if not driver.strip():
+        return None
+    if len(driver) > MAX_DRIVER_CHARS or driver.count("\n") > MAX_DRIVER_LINES:
+        return None
+    # The contract asks for exactly one `if __name__ == "__main__":` block;
+    # anything else (prose, a bare function call, a second definition) is
+    # not what was asked for, so it is refused rather than guessed at.
+    if not re.match(r'^if\s+__name__\s*==\s*["\']__main__["\']\s*:', driver.strip()):
+        return None
+    return driver
 
 
 def parse_blueprint_response(raw_text: str, line_count: int = 0) -> Dict:

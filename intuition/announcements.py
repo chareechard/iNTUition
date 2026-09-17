@@ -1,20 +1,27 @@
 """Persistent, course-aggregated iNTUition announcements."""
+import hashlib
 import json
 import os
 import re
+import threading
+import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional, Set, Tuple
 
 from bs4 import BeautifulSoup
 
 from intuition import rest
 from intuition import academic_calendar
 from intuition import ai_provider
+from intuition.persistence import atomic_json_dump
 
 STORAGE_DIR = ".intuition"
 FILENAME = "announcements.json"
 SUMMARY_VERSION = 2
 RETENTION_DAYS = 7
+# Bump when the deterministic dedupe/scrub logic changes so a persisted feed is
+# re-cleaned on the next load instead of carrying stale merges forward.
+CLEAN_VERSION = 1
 URL = "https://ntulearn.ntu.edu.sg/learn/api/public/v1/courses/{course_id}/announcements"
 SCHEDULE_ACTION = re.compile(
     r"\b(cancel+ed|postponed|rescheduled|moved|new venue|make.?up)\b|"
@@ -40,6 +47,237 @@ IMPORTANT_DATE_PATTERN = re.compile(
     r"\b(mid[ -]?term|final(?:\s+exam)?|exam(?:ination)?|quiz|test|"
     r"presentation|demo|oral|viva|defen[cs]e|assignment|homework|coursework|"
     r"project|report|essay|graded)\b", re.IGNORECASE)
+
+# ── Data cleaning ──────────────────────────────────────────────────────────────
+# Blackboard bodies arrive wrapped in mail-merge chrome and the same post is
+# often cross-listed into several course shells (each shell copy gets its own
+# id). Everything below scrubs the noise and collapses those duplicates so the
+# ticker shows one clean line per real announcement.
+_ZERO_WIDTH = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+_BOILERPLATE_LINE = re.compile(
+    r"^\s*(?:"
+    r"do not reply to this (?:e-?mail|message|announcement)"
+    r"|please do not reply(?: to this (?:e-?mail|message))?"
+    r"|this (?:is|was) an? (?:automated|automatic|system[- ]generated) "
+    r"(?:e-?mail|message|notification|announcement).*"
+    r"|you are receiving this (?:e-?mail|message|because).*"
+    r"|(?:sent|posted|delivered) (?:from|via|by|using) (?:blackboard|ntulearn|"
+    r"the ntulearn.*|black\s*board learn).*"
+    r"|posted on\s*:.*"
+    r"|<!--.*-->"
+    r"|[-=_*]{4,}"
+    r")\s*$", re.IGNORECASE)
+_SIGNOFF_TAIL = re.compile(
+    r"\n[ \t]*(?:best|kind|warm|many)?\s*(?:regards|wishes)\b[\s\S]{0,120}\Z"
+    r"|\n[ \t]*(?:cheers|sincerely|thank you|thanks|yours (?:sincerely|faithfully|truly))"
+    r"[ ,!.]*(?:\n[\s\S]{0,80})?\Z",
+    re.IGNORECASE)
+_DEAD_LINK_SCHEMES = ("mailto:", "javascript:", "tel:", "#")
+_ANNOUNCEMENT_PAGE = re.compile(
+    r"announcement_manager\.jsp|/webapps/blackboard/execute/announcement"
+    r"|/ultra/courses/[^/]+/announcements", re.IGNORECASE)
+
+_CODE_TOKEN = re.compile(r"\b(?:AY\d{4}|\d{2}S\d|[A-Z]{2,4}\d{4}[A-Z]?)\b")
+_TITLE_PREFIX = re.compile(
+    r"^\s*(?:re|fw|fwd)\s*:\s*|^\s*[\[(]?(?:" + _CODE_TOKEN.pattern + r")[\])]?[\s:/,\-]*",
+    re.IGNORECASE)
+_NON_WORD = re.compile(r"[^0-9a-z]+")
+_STOPWORDS = frozenset(
+    "the a an of to for on in at is are be this that your you our we will with and or "
+    "please dear all students student hi hello good morning afternoon evening".split())
+
+
+def _scrub_text(text: str) -> str:
+    """Strip mail chrome, sign-offs and whitespace noise from an announcement body
+    without dropping any of the substance (dates, venues, links stay)."""
+    text = _ZERO_WIDTH.sub("", str(text or "")).replace("\xa0", " ")
+    kept = []
+    for line in text.split("\n"):
+        line = line.rstrip()
+        if _BOILERPLATE_LINE.match(line):
+            continue
+        kept.append(line)
+    text = "\n".join(kept)
+    match = _SIGNOFF_TAIL.search(text)
+    if match:
+        trimmed = text[:match.start()].rstrip()
+        removed = len(text) - match.start()
+        # Accept the trim when it leaves real content behind, or when the tail it
+        # removes is itself just a short "Regards, <name>" - never when a terse
+        # announcement is *entirely* a sign-off ("Thanks, see you Monday").
+        if len(trimmed.strip()) >= 40 or (trimmed.strip() and removed <= 60):
+            text = trimmed
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _scrub_links(links: List[Dict]) -> List[Dict]:
+    """De-duplicate by URL, drop dead schemes and self-referential LMS links, and
+    prefer a human title over a bare-URL title for the same target."""
+    best: Dict[str, Dict] = {}
+    for link in links:
+        url = str(link.get("url") or "").strip()
+        if not url or url.lower().startswith(_DEAD_LINK_SCHEMES):
+            continue
+        if _ANNOUNCEMENT_PAGE.search(url):
+            continue
+        title = str(link.get("title") or "").strip() or url
+        current = best.get(url)
+        if current is None or (current["title"] == url and title != url):
+            best[url] = {"title": title, "url": url}
+    return list(best.values())
+
+
+def _norm_words(text: str) -> List[str]:
+    return [w for w in _NON_WORD.sub(" ", str(text or "").casefold()).split() if w]
+
+
+def content_key(item: Dict) -> str:
+    """A signature that is identical for one announcement cross-listed into
+    several course shells: normalised body (the strongest signal), normalised
+    course-code-stripped title, and the release day."""
+    title_words = [w for w in _norm_words(_TITLE_PREFIX.sub("", item.get("title") or ""))]
+    body_words = _norm_words(item.get("body"))
+    released = _released(item)
+    day = released.date().isoformat() if released else ""
+    basis = " ".join(body_words) or " ".join(title_words)
+    return hashlib.sha1(
+        ("{}|{}|{}".format(basis, " ".join(title_words), day)).encode("utf-8")
+    ).hexdigest()
+
+
+def _raw_hash(item: Dict) -> str:
+    return hashlib.sha1(
+        ("{}\x1f{}".format(item.get("title") or "", item.get("body") or "")).encode("utf-8")
+    ).hexdigest()
+
+
+def _similarity(a: Dict, b: Dict) -> float:
+    """Jaccard overlap of the significant words in two announcements (title+body).
+    Used only to decide which items are worth an AI same-or-not judgement."""
+    def bag(item):
+        return {w for w in _norm_words("{} {}".format(item.get("title", ""), item.get("body", "")))
+                if w not in _STOPWORDS and len(w) > 2}
+    x, y = bag(a), bag(b)
+    if not x or not y:
+        return 0.0
+    return len(x & y) / len(x | y)
+
+
+def _merge_group(group: List[Dict], read: Set[str]) -> Dict:
+    """Fold a set of duplicate shell copies into one primary item. Stable choice
+    of primary (earliest release, then lowest id) so the surviving id does not
+    change between syncs. Mutates ``read`` to follow the survivor."""
+    group = sorted(group, key=lambda x: (str(x.get("created") or ""), str(x.get("id") or "")))
+    primary = dict(group[0])
+    primary["links"] = list(primary.get("links") or [])  # own copy - do not mutate the source
+    ids = {str(x.get("id") or "") for x in group}
+
+    seen_courses = {primary.get("course")}
+    extra_courses = list(primary.get("cross_posted") or [])
+    known_urls = {link["url"] for link in primary["links"]}
+    for dup in group[1:]:
+        name = dup.get("course")
+        if name and name not in seen_courses:
+            seen_courses.add(name)
+            extra_courses.append(name)
+        for link in dup.get("links", []):
+            if link["url"] not in known_urls:
+                known_urls.add(link["url"])
+                primary["links"].append(link)
+    if extra_courses:
+        primary["cross_posted"] = sorted(set(extra_courses))
+    primary["duplicate_ids"] = sorted(ids - {str(primary.get("id") or "")})
+
+    if ids & read:
+        read.difference_update(ids)
+        read.add(str(primary.get("id") or ""))
+    return primary
+
+
+def dedupe(items: List[Dict], read: Optional[Set[str]] = None) -> Tuple[List[Dict], int]:
+    """Collapse exact cross-posts (same ``content_key``). Order-preserving on the
+    surviving items; returns ``(items, collapsed_count)``."""
+    read = read if read is not None else set()
+    groups: Dict[str, List[Dict]] = {}
+    order: List[str] = []
+    for item in items:
+        key = content_key(item)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(item)
+    out, collapsed = [], 0
+    for key in order:
+        group = groups[key]
+        if len(group) == 1:
+            out.append(group[0])
+        else:
+            collapsed += len(group) - 1
+            out.append(_merge_group(group, read))
+    return out, collapsed
+
+
+# Only items this close, but not already identical, are worth an AI judgement.
+AI_DUPE_SIMILARITY = 0.72
+
+
+def _ambiguous_clusters(items: List[Dict]) -> List[List[Dict]]:
+    """Transitively group items that are textually close (>= AI_DUPE_SIMILARITY)
+    yet have different content keys - the deterministic pass has already handled
+    everything else. Each returned cluster has 2+ members."""
+    keyed = [(content_key(item), item) for item in items]
+    parent = list(range(len(keyed)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for a in range(len(keyed)):
+        for b in range(a + 1, len(keyed)):
+            if keyed[a][0] == keyed[b][0]:
+                continue
+            if _similarity(keyed[a][1], keyed[b][1]) >= AI_DUPE_SIMILARITY:
+                parent[find(a)] = find(b)
+    buckets: Dict[int, List[Dict]] = {}
+    for i, (_key, item) in enumerate(keyed):
+        buckets.setdefault(find(i), []).append(item)
+    return [members for members in buckets.values() if len(members) > 1]
+
+
+def _cluster_fingerprint(cluster: List[Dict]) -> str:
+    """Stable id for a cluster: its members' ids plus their raw-content hashes, so
+    an edited announcement invalidates the cached verdict but a re-sync does not."""
+    parts = sorted("{}:{}".format(item.get("id"), _raw_hash(item)) for item in cluster)
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _parse_id_groups(text, known_ids: Set[str]) -> Optional[List[List[str]]]:
+    """Decode the AI's ``[["id","id"], ...]`` reply, keeping only supplied ids."""
+    text = str(text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    start = text.find("[")
+    if start < 0:
+        return None
+    try:
+        parsed, _end = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    groups = []
+    for row in parsed:
+        if not isinstance(row, list):
+            continue
+        members = sorted({str(x) for x in row if str(x) in known_ids})
+        if len(members) > 1:
+            groups.append(members)
+    return groups
+
 
 SCHEDULE_CHANGE_SCHEMA = json.dumps({
     "type": "array", "items": {"type": "object", "additionalProperties": False,
@@ -124,8 +362,9 @@ def _timestamp(value: str):
 def _released(item: Dict):
     # ``created`` is the release date. Fall back for older/cached payloads where
     # Blackboard supplied only a modification or availability-start timestamp.
-    return (_timestamp(item.get("created")) or _timestamp(item.get("starts"))
-            or _timestamp(item.get("modified")))
+    return (_timestamp(str(item.get("created") or ""))
+            or _timestamp(str(item.get("starts") or ""))
+            or _timestamp(str(item.get("modified") or "")))
 
 
 def _recent(items: List[Dict], now=None) -> List[Dict]:
@@ -142,7 +381,7 @@ def clean(item: Dict, course: Dict) -> Dict:
                       "url": anchor["href"]})
     # Plain URLs are common in announcements without an <a>; linkify those client-side
     # later, but retain the readable body here.
-    text = soup.get_text("\n", strip=True)
+    text = _scrub_text(soup.get_text("\n", strip=True))
     known = {link["url"] for link in links}
     for url in re.findall(r"https?://[^\s<>]+", text):
         url = url.rstrip(".,);]")
@@ -153,8 +392,9 @@ def clean(item: Dict, course: Dict) -> Dict:
     duration = availability.get("duration") or {}
     return {
         "id": str(item.get("id") or ""), "course_id": course["id"],
-        "course": course["name"], "title": item.get("title") or "Announcement",
-        "body": text, "links": links, "created": item.get("created") or "",
+        "course": course["name"], "title": " ".join(str(
+            item.get("title") or "Announcement").split()),
+        "body": text, "links": _scrub_links(links), "created": item.get("created") or "",
         "modified": item.get("modified") or "", "starts": duration.get("start"),
         "ends": duration.get("end"),
     }
@@ -164,10 +404,20 @@ class Feed:
     def __init__(self, root: str):
         self.root = root
         self.path = _path(root)
+        self._lock = threading.RLock()
         self.items: List[Dict] = []
-        self.read = set()
+        # Personal announcements the student adds themselves. Kept apart from the
+        # synced LMS feed so a Blackboard sync never merges, retention-prunes, or
+        # uploads them - they are local reminders, not course posts.
+        self.local: List[Dict] = []
+        self.read: Set[str] = set()
         self.synced_at = ""
-        self.summary = None
+        self.summary: Optional[Dict] = None
+        # Cached "is this the same announcement" verdicts from the AI pass, keyed
+        # by the fingerprint of the ambiguous cluster it judged, so a steady feed
+        # never re-pays for the call. See ``resolve_duplicates_with_ai``.
+        self.dupe_cache: Dict[str, List[List[str]]] = {}
+        self.clean_version = 0
         self.load()
 
     def load(self):
@@ -175,22 +425,37 @@ class Feed:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             self.items = data.get("items") or []
+            self.local = data.get("local") or []
             self.read = set(data.get("read") or [])
             self.synced_at = data.get("synced_at") or ""
             self.summary = data.get("summary")
+            self.dupe_cache = data.get("dupe_cache") or {}
+            self.clean_version = data.get("clean_version") or 0
         except (OSError, ValueError, TypeError):
-            self.items, self.read, self.synced_at, self.summary = [], set(), "", None
+            self.items, self.local, self.read = [], [], set()
+            self.synced_at, self.summary = "", None
+            self.dupe_cache, self.clean_version = {}, 0
+        # Self-heal a persisted feed offline: collapse any cross-posts left by an
+        # older build so the ticker is clean before the first Blackboard sync.
+        # Kept in memory only; the next save persists it.
+        deduped, collapsed = dedupe(self.items, self.read)
+        if collapsed or self.clean_version != CLEAN_VERSION:
+            self.items = deduped
 
     def save(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"items": self.items, "read": sorted(self.read),
-                       "synced_at": self.synced_at, "summary": self.summary}, f, indent=2)
-        os.replace(tmp, self.path)
+        with self._lock:
+            self.clean_version = CLEAN_VERSION
+            atomic_json_dump(
+                self.path,
+                {"items": self.items, "local": self.local, "read": sorted(self.read),
+                 "synced_at": self.synced_at, "summary": self.summary,
+                 "dupe_cache": self.dupe_cache, "clean_version": CLEAN_VERSION},
+                indent=2,
+            )
 
     def sync(self, token: str, courses: List[Dict]) -> List[str]:
-        fetched, errors = [], []
+        fetched: List[Dict] = []
+        errors: List[str] = []
         for course in courses:
             try:
                 rows = rest._get_paged(token, URL.format(course_id=course["id"]),
@@ -203,11 +468,17 @@ class Feed:
         # announcements that are still within their seven-day display window.
         merged = {item["id"]: item for item in self.items if item.get("id")}
         merged.update((item["id"], item) for item in fetched)
-        items = _recent(list(merged.values()))
+        # Collapse cross-posts (the same announcement in several course shells)
+        # every sync - Blackboard re-serves every shell copy each time, so this
+        # cannot be a one-off migration.
+        items, _collapsed = dedupe(list(merged.values()), self.read)
+        items = self._apply_dupe_cache(items)
+        items = _recent(items)
         items.sort(key=lambda x: x.get("modified") or x.get("created") or "", reverse=True)
         self.items = items
         self.synced_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        live = {item["id"] for item in items}
+        # Personal announcements are not in ``items``; keep their read flags too.
+        live = {item["id"] for item in items} | {item["id"] for item in self.local}
         self.read.intersection_update(live)
         if self.summary and (self.summary.get("feed_ids") != sorted(live)
                              or self.summary.get("version") != SUMMARY_VERSION):
@@ -215,24 +486,188 @@ class Feed:
         self.save()
         return errors
 
-    def mark_read(self, item_id: str, value=True) -> bool:
-        if item_id not in {item["id"] for item in self.items}:
-            return False
-        if value:
-            self.read.add(item_id)
-        else:
+    def _apply_dupe_cache(self, items: List[Dict]) -> List[Dict]:
+        """Re-apply AI same-announcement verdicts that ``resolve_duplicates_with_ai``
+        already paid for, so a steady feed stays collapsed without another call."""
+        if not self.dupe_cache:
+            return items
+        wanted = {frozenset(group) for groups in self.dupe_cache.values()
+                  for group in groups if len(group) > 1}
+        if not wanted:
+            return items
+        by_id = {str(item.get("id") or ""): item for item in items}
+        consumed: Set[str] = set()
+        out: List[Dict] = []
+        for item in items:
+            item_id = str(item.get("id") or "")
+            if item_id in consumed:
+                continue
+            group_ids = next((g for g in wanted if item_id in g
+                              and len(g & by_id.keys()) > 1), None)
+            if group_ids:
+                members = [by_id[i] for i in group_ids if i in by_id]
+                consumed.update(i for i in group_ids if i in by_id)
+                out.append(_merge_group(members, self.read))
+            else:
+                out.append(item)
+        return out
+
+    def purge_duplicates(self) -> int:
+        """On-demand: collapse cross-posts in the persisted feed now, without a
+        Blackboard token. Returns how many shell copies were folded away."""
+        with self._lock:
+            deduped, collapsed = dedupe(self.items, self.read)
+            deduped = self._apply_dupe_cache(deduped)
+            if collapsed or len(deduped) != len(self.items):
+                self.items = deduped
+                live = ({item["id"] for item in self.items}
+                        | {item["id"] for item in self.local})
+                self.read.intersection_update(live)
+                self.summary = None
+                self.save()
+            return collapsed
+
+    def resolve_duplicates_with_ai(self, preferred=None) -> int:
+        """Fold in near-duplicates the deterministic pass cannot see - the same
+        announcement re-posted with light edits or into a differently-named shell.
+
+        Cheap by construction: it only calls the model when two or more items are
+        textually close but not identical, and it caches the verdict by the
+        cluster's fingerprint so a stable feed never pays twice. Best-effort - any
+        failure leaves the deterministic feed untouched.
+        """
+        with self._lock:
+            items = list(self.items)
+        clusters = _ambiguous_clusters(items)
+        if not clusters:
+            return 0
+        pending = [(fp, cluster) for fp, cluster in
+                   ((_cluster_fingerprint(c), c) for c in clusters)
+                   if fp not in self.dupe_cache]
+        if pending and not ai_provider.status(preferred).get("ready"):
+            pending = []  # nothing new we can judge; fall through to re-apply cache
+        cache_changed = False
+        if pending:
+            blocks = []
+            for _fp, cluster in pending:
+                for item in cluster:
+                    blocks.append("ID: {}\nCOURSE: {}\nTITLE: {}\nBODY:\n{}".format(
+                        item.get("id"), item.get("course"), item.get("title"),
+                        (item.get("body") or "")[:1200]))
+            system = (
+                "You de-duplicate a university student's announcement feed. Group "
+                "announcements that are, for this student, the SAME notice: the "
+                "identical message cross-listed into another course shell, or "
+                "re-posted with only cosmetic edits. ALSO group near-identical "
+                "notices addressed to different tutorial/lab/seminar groups of the "
+                "same course (e.g. 'no SCSF tutorial' and 'no SCSE tutorial' for the "
+                "same reason) - the student is in at most one group, so the rest are "
+                "noise. Do NOT group announcements that merely share a topic, a "
+                "course, or a date, or that carry different instructions/dates/venues. "
+                "Return a JSON array of arrays of ids, no fences, e.g. "
+                "[[\"_1_1\",\"_2_1\"]]. Return [] if every announcement is distinct. "
+                "Never include an id that was not supplied.")
+            known_ids = {str(item.get("id") or "")
+                         for _fp, cluster in pending for item in cluster}
+            try:
+                result = ai_provider.complete_tier(
+                    "bulk", "\n\n--- ANNOUNCEMENT ---\n".join(blocks), system=system,
+                    preferred=preferred, max_tokens=500, download_root=self.root)
+                verdict = _parse_id_groups(result.get("text"), known_ids)
+            except Exception:
+                verdict = None
+            if verdict is not None:
+                # File the verdict per cluster so an unrelated feed change does not
+                # invalidate a judgement that is still valid.
+                for fingerprint, cluster in pending:
+                    cluster_ids = {str(i.get("id") or "") for i in cluster}
+                    self.dupe_cache[fingerprint] = [
+                        sorted(g) for g in verdict
+                        if len(set(g) & cluster_ids) > 1]
+                cache_changed = True
+        with self._lock:
+            pruned = self._prune_dupe_cache()
+            before = len(self.items)
+            self.items = self._apply_dupe_cache(self.items)
+            collapsed = before - len(self.items)
+            if collapsed:
+                live = ({item["id"] for item in self.items}
+                        | {item["id"] for item in self.local})
+                self.read.intersection_update(live)
+                self.summary = None
+            if collapsed or cache_changed or pruned:
+                self.save()
+        return collapsed
+
+    def _prune_dupe_cache(self) -> bool:
+        """Drop cached verdicts whose announcements have all aged out. Returns
+        whether anything was removed."""
+        live = {str(item.get("id") or "") for item in self.items}
+        live |= {i for item in self.items for i in (item.get("duplicate_ids") or [])}
+        kept = {key: groups for key, groups in self.dupe_cache.items()
+                if any(set(group) & live for group in groups)}
+        removed = len(kept) != len(self.dupe_cache)
+        self.dupe_cache = kept
+        return removed
+
+    def add_local(self, text: str, priority: str = "info") -> Dict:
+        """Record a student's own announcement (a reminder), newest first."""
+        with self._lock:
+            text = " ".join(str(text or "").split())[:240]
+            if not text:
+                raise ValueError("announcement text is required")
+            if priority not in ("info", "warning", "urgent"):
+                priority = "info"
+            item = {
+                "id": "local-" + uuid.uuid4().hex, "course": "Personal",
+                "course_id": "", "title": text, "body": "", "links": [],
+                "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "modified": "", "starts": None, "ends": None, "priority": priority,
+            }
+            self.local.insert(0, item)
+            self.save()
+            return item
+
+    def remove_local(self, item_id: str) -> bool:
+        """Drop a personal announcement. Never touches the synced LMS feed."""
+        with self._lock:
+            kept = [item for item in self.local if item["id"] != item_id]
+            if len(kept) == len(self.local):
+                return False
+            self.local = kept
             self.read.discard(item_id)
-        self.save()
-        return True
+            self.save()
+            return True
+
+    def mark_read(self, item_id: str, value=True) -> bool:
+        with self._lock:
+            known = ({item["id"] for item in self.items}
+                     | {item["id"] for item in self.local})
+            if item_id not in known:
+                return False
+            if value:
+                self.read.add(item_id)
+            else:
+                self.read.discard(item_id)
+            self.save()
+            return True
 
     def snapshot(self) -> Dict:
-        items = [dict(item, read=item["id"] in self.read) for item in self.items]
-        return {"items": items, "total": len(items),
-                "unread": sum(not item["read"] for item in items),
-                "courses": sorted({item["course"] for item in items}),
-                "synced_at": self.synced_at, "summary": self.summary}
+        with self._lock:
+            local = [dict(item, read=item["id"] in self.read, local=True)
+                     for item in self.local]
+            synced = [dict(item, read=item["id"] in self.read, local=False)
+                      for item in self.items]
+            items = local + synced
+            return {"items": items, "total": len(items),
+                    "unread": sum(not item["read"] for item in items),
+                    # Synced only - "Personal" is not a real course filter.
+                    "courses": sorted({item["course"] for item in synced}),
+                    "synced_at": self.synced_at, "summary": self.summary}
 
     def summarize(self, preferred=None) -> Dict:
+        # ``self.items`` only: personal announcements are the student's own
+        # reminders and are deliberately kept out of the AI TL;DR.
         source = [item for item in self.items if item["id"] not in self.read] or self.items
         if not source:
             raise ValueError("No announcements to summarize")
@@ -264,12 +699,13 @@ class Feed:
             # Claude CLI when the local gateway is installed but unhealthy.
             preferred=preferred,
             download_root=self.root)
-        self.summary = dict(result, version=SUMMARY_VERSION,
-                            source_ids=sorted(item["id"] for item in source),
-                            feed_ids=sorted(item["id"] for item in self.items),
-                            generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        summary = dict(result, version=SUMMARY_VERSION,
+                       source_ids=sorted(item["id"] for item in source),
+                       feed_ids=sorted(item["id"] for item in self.items),
+                       generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        self.summary = summary
         self.save()
-        return self.summary
+        return summary
 
     def detect_schedule_changes(self, sessions: List[Dict], preferred=None) -> List[Dict]:
         """Extract explicit, dated timetable exceptions from professor announcements."""

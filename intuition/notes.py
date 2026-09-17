@@ -107,6 +107,25 @@ class Notebook:
             if "report" not in existing_columns:
                 db.execute(
                     "ALTER TABLE summaries ADD COLUMN report TEXT NOT NULL DEFAULT ''")
+            # One row per graded submission - document_id is the practice/tutorial
+            # material the student had open, solution_document_id is whichever
+            # professor solution grading.py matched it against (solution_pairs'
+            # job), so a later run against a re-uploaded solution key is still
+            # traceable to which version graded which attempt.
+            db.execute("""CREATE TABLE IF NOT EXISTS gradings (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                solution_document_id TEXT NOT NULL DEFAULT '',
+                material_name TEXT NOT NULL DEFAULT '',
+                work_filename TEXT NOT NULL DEFAULT '',
+                backend TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                rung TEXT NOT NULL DEFAULT '',
+                feedback TEXT NOT NULL DEFAULT '',
+                ok INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )""")
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=5)
@@ -120,6 +139,13 @@ class Notebook:
             return None
         return dict(zip(("document_id", "rel_path", "mime_type", "drive_modified",
                          "markdown", "last_page", "created_at", "updated_at"), row))
+
+    @staticmethod
+    def _row_required(row) -> Dict:
+        value = Notebook._row(row)
+        if value is None:
+            raise RuntimeError("note row disappeared during a write")
+        return value
 
     def get(self, document_id: str) -> Optional[Dict]:
         with self._lock, self._connect() as db:
@@ -157,7 +183,10 @@ class Notebook:
                            (document_id, str(rel_path)[:1000], markdown))
             except sqlite3.OperationalError:
                 pass
-        return self.get(document_id)
+        value = self.get(document_id)
+        if value is None:
+            raise RuntimeError("note was not readable after save")
+        return value
 
     @staticmethod
     def _match_expression(query: str) -> str:
@@ -201,7 +230,7 @@ class Notebook:
                     drive_modified, markdown, last_page, created_at, updated_at
                     FROM notes WHERE rel_path LIKE ? OR markdown LIKE ?
                     ORDER BY updated_at DESC LIMIT ?""", (needle, needle, limit)).fetchall()
-        return [self._row(row) for row in rows]
+        return [self._row_required(row) for row in rows]
 
     _SUMMARY_COLUMNS = ("id", "document_id", "material_name", "prompt", "scope",
                        "backend", "model", "rung", "tex_path", "pdf_path",
@@ -213,6 +242,13 @@ class Notebook:
         if not row:
             return None
         return dict(zip(cls._SUMMARY_COLUMNS, row))
+
+    @classmethod
+    def _summary_required(cls, row) -> Dict:
+        value = cls._summary_row(row)
+        if value is None:
+            raise RuntimeError("summary row disappeared during a write")
+        return value
 
     def save_summary(self, summary_id: str, document_id: str, material_name: str = "",
                      prompt: str = "", scope: str = "", backend: str = "",
@@ -244,7 +280,10 @@ class Notebook:
                  str(model)[:100], str(rung)[:100], str(tex_path)[:1000],
                  str(pdf_path)[:1000], anchors[:2000], 1 if ok else 0,
                  str(error)[:2000], str(report)[:4000], now))
-        return self.get_summary(summary_id)
+        value = self.get_summary(summary_id)
+        if value is None:
+            raise RuntimeError("summary was not readable after save")
+        return value
 
     def get_summary(self, summary_id: str) -> Optional[Dict]:
         with self._lock, self._connect() as db:
@@ -258,7 +297,7 @@ class Notebook:
                 self._SUMMARY_SELECT + " WHERE document_id=? "
                 "ORDER BY created_at DESC LIMIT ?",
                 (str(document_id)[:256], max(1, min(int(limit), 100)))).fetchall()
-        return [self._summary_row(row) for row in rows]
+        return [self._summary_required(row) for row in rows]
 
     def delete_summary(self, summary_id: str) -> Optional[Dict]:
         """Delete one summary row, returning it (paths and all) so the caller can
@@ -274,7 +313,7 @@ class Notebook:
             if not row:
                 return None
             db.execute("DELETE FROM summaries WHERE id=?", (summary_id,))
-        return self._summary_row(row)
+        return self._summary_required(row)
 
     def delete_summaries_older_than(self, cutoff_iso: str) -> List[Dict]:
         """Bulk sweep for the dashboard's startup housekeeping - every deleted row
@@ -286,4 +325,70 @@ class Notebook:
                              (cutoff_iso,)).fetchall()
             if rows:
                 db.execute("DELETE FROM summaries WHERE created_at < ?", (cutoff_iso,))
-        return [self._summary_row(row) for row in rows]
+        return [self._summary_required(row) for row in rows]
+
+    _GRADING_COLUMNS = ("id", "document_id", "solution_document_id", "material_name",
+                       "work_filename", "backend", "model", "rung", "feedback",
+                       "ok", "error", "created_at")
+    _GRADING_SELECT = "SELECT " + ", ".join(_GRADING_COLUMNS) + " FROM gradings"
+
+    @classmethod
+    def _grading_row(cls, row) -> Optional[Dict]:
+        if not row:
+            return None
+        return dict(zip(cls._GRADING_COLUMNS, row))
+
+    @classmethod
+    def _grading_required(cls, row) -> Dict:
+        value = cls._grading_row(row)
+        if value is None:
+            raise RuntimeError("grading row disappeared during a write")
+        return value
+
+    def save_grading(self, grading_id: str, document_id: str,
+                     solution_document_id: str = "", material_name: str = "",
+                     work_filename: str = "", backend: str = "", model: str = "",
+                     rung: str = "", feedback: str = "", ok: bool = False,
+                     error: str = "") -> Dict:
+        """Recording the model and the exact solution document graded against makes
+        a grade auditable rather than a black-box verdict - same reasoning as
+        ``save_summary``'s provenance columns."""
+        grading_id = str(grading_id or "").strip()[:64]
+        if not grading_id:
+            raise ValueError("grading id is required")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT INTO gradings(id, document_id, solution_document_id,
+                material_name, work_filename, backend, model, rung, feedback,
+                ok, error, created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                document_id=excluded.document_id,
+                solution_document_id=excluded.solution_document_id,
+                material_name=excluded.material_name,
+                work_filename=excluded.work_filename, backend=excluded.backend,
+                model=excluded.model, rung=excluded.rung, feedback=excluded.feedback,
+                ok=excluded.ok, error=excluded.error""",
+                (grading_id, str(document_id or "")[:256],
+                 str(solution_document_id or "")[:256], str(material_name)[:1000],
+                 str(work_filename)[:500], str(backend)[:40], str(model)[:100],
+                 str(rung)[:100], str(feedback)[:20000], 1 if ok else 0,
+                 str(error)[:2000], now))
+        value = self.get_grading(grading_id)
+        if value is None:
+            raise RuntimeError("grading was not readable after save")
+        return value
+
+    def get_grading(self, grading_id: str) -> Optional[Dict]:
+        with self._lock, self._connect() as db:
+            row = db.execute(self._GRADING_SELECT + " WHERE id=?",
+                             (str(grading_id)[:64],)).fetchone()
+        return self._grading_row(row)
+
+    def list_gradings(self, document_id: str, limit: int = 20) -> List[Dict]:
+        with self._lock, self._connect() as db:
+            rows = db.execute(
+                self._GRADING_SELECT + " WHERE document_id=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (str(document_id)[:256], max(1, min(int(limit), 100)))).fetchall()
+        return [self._grading_required(row) for row in rows]

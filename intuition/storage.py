@@ -66,7 +66,8 @@ class Storage:
                 for new_child in new_node["children"]:
                     name = new_child["name"]
                     old_child = saved_children[mapping[name]] if name in mapping else None
-                    traverse(old_child, new_child)
+                    if old_child is not None:
+                        traverse(old_child, new_child)
 
         # since download dir is of type list, need to recompute the top level mapping
         top_level_mapping: Dict[str, int] = {
@@ -78,7 +79,8 @@ class Storage:
                 if r_node["name"] in top_level_mapping
                 else None
             )
-            traverse(l_node, r_node)
+            if l_node is not None:
+                traverse(l_node, r_node)
 
     def save_download_dir(self, download_dir: Dict):
         """first compute child name to index mappings and then save updated download_dir to storage

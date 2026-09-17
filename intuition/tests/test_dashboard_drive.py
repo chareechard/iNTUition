@@ -8,6 +8,18 @@ from unittest.mock import patch
 from intuition import dashboard, drive
 
 
+class _FakeNotebook:
+    """No-op stand-in for intuition.notes.Notebook - do_drive_list's auto-tag
+    pass only needs .get()/.save(), and these fixtures carry no solution-like
+    filenames, so .save() is never expected to be called."""
+
+    def get(self, _document_id):
+        return None
+
+    def save(self, *args, **kwargs):
+        raise AssertionError("no solution-like file in this fixture should be tagged")
+
+
 def test_drive_inventory_merges_current_and_legacy_roots():
     listings = {
         "iNTUition": [
@@ -34,6 +46,7 @@ def test_drive_inventory_merges_current_and_legacy_roots():
         drive_listing=True,
         lock=threading.Lock(),
         note=notes.append,
+        notebook=_FakeNotebook(),
     )
     with patch.object(drive, "build_service", return_value=object()), \
          patch.object(drive, "DriveMirror", Mirror):
@@ -60,6 +73,7 @@ def test_custom_drive_root_does_not_merge_legacy_archive():
         drive_listing=True,
         lock=threading.Lock(),
         note=lambda _message: None,
+        notebook=_FakeNotebook(),
     )
     with patch.object(drive, "build_service", return_value=object()), \
          patch.object(drive, "DriveMirror", Mirror):
@@ -88,6 +102,66 @@ def test_drive_pull_reports_an_expired_token_instead_of_failing_silently():
         dashboard.do_drive_pull(state, ["some-id"])
 
     assert notes == ["Drive unavailable: token expired"]
+    assert state.pulling is False
+
+
+def test_drive_pull_refreshes_stale_inventory_before_resolving_destination():
+    """A stale cache must not turn a nested module file into a root-level pull."""
+    item = {
+        "id": "mh2500-hand01",
+        "name": "Hand01.pdf",
+        "rel_path": "26S1-MH2500-PROBABILITY/Tutorials/Hand01.pdf",
+        "mime_type": "application/pdf",
+        "size": 123,
+        "modified": "2026-08-24T00:00:00Z",
+    }
+    pulled = []
+    notes = []
+    state = SimpleNamespace(
+        drive_folder=drive.DEFAULT_ROOT_FOLDER,
+        drive_files=[],  # the browser cache is stale/missing this item
+        pulling=True,
+        pull_progress={},
+        download_root="NTU",
+        lock=threading.Lock(),
+        note=notes.append,
+        refresh_media=lambda: None,
+    )
+
+    def fake_pull(_service, selected, _root, progress=None):
+        pulled.append(selected["rel_path"])
+        return "NTU/26S1-MH2500-PROBABILITY/Tutorials/Hand01.pdf"
+
+    with patch.object(drive, "build_service", return_value=object()), \
+         patch.object(drive, "list_files_from_roots", return_value=([item], {})), \
+         patch.object(drive, "pull_file", side_effect=fake_pull):
+        dashboard.do_drive_pull(state, [item["id"]])
+
+    assert pulled == [item["rel_path"]]
+    assert state.drive_files == [item]
+    assert state.pulling is False
+
+
+def test_drive_pull_rejects_ids_outside_index_instead_of_dumping_at_root():
+    """Unknown metadata is unsafe: a filename is not a valid destination path."""
+    notes = []
+    state = SimpleNamespace(
+        drive_folder=drive.DEFAULT_ROOT_FOLDER,
+        drive_files=[],
+        pulling=True,
+        pull_progress={},
+        download_root="NTU",
+        lock=threading.Lock(),
+        note=notes.append,
+        refresh_media=lambda: None,
+    )
+    with patch.object(drive, "build_service", return_value=object()), \
+         patch.object(drive, "list_files_from_roots", return_value=([], {})), \
+         patch.object(drive, "pull_file") as pull:
+        dashboard.do_drive_pull(state, ["outside-configured-roots"])
+
+    pull.assert_not_called()
+    assert any("skipped to protect folder structure" in message for message in notes)
     assert state.pulling is False
 
 
@@ -174,3 +248,126 @@ def test_drive_content_falls_back_to_drives_own_mime_type_for_unknown_extensions
     header_block, _, body = response.partition(b"\r\n\r\n")
     assert b"Content-Type: text/x-java" in header_block
     assert body == b"public class Hello {}"
+
+
+def _drive_content_handler(state, path, headers=None):
+    handler = dashboard.Handler.__new__(dashboard.Handler)
+    handler.state = state
+    handler.path = path
+    handler.headers = headers if headers is not None else {}
+    handler.requestline = "GET {} HTTP/1.1".format(path)
+    handler.request_version = "HTTP/1.1"
+    handler.rfile = io.BytesIO(b"")
+    handler.wfile = io.BytesIO()
+    handler._headers_buffer = []
+    handler.close_connection = False
+    return handler
+
+
+def test_drive_content_renders_docx_as_html_for_the_iframe():
+    """A .docx has no native browser renderer and the material drawer loads
+    /api/drive/content into an <iframe>; the handler converts it to HTML."""
+    with TemporaryDirectory() as tmp:
+        docx_path = os.path.join(tmp, "Tut6.docx")
+        document = (
+            '<?xml version="1.0"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+            'wordprocessingml/2006/main"><w:body>'
+            '<w:p><w:r><w:t>Solve for x.</w:t></w:r></w:p>'
+            '</w:body></w:document>')
+        import zipfile
+        with zipfile.ZipFile(docx_path, "w") as archive:
+            archive.writestr("word/document.xml", document)
+
+        item = {"id": "abc123", "mime_type": drive.DOCX_MIME,
+                "rel_path": "SC2001/Tutorial/Tut6.docx", "size": 42}
+        state = SimpleNamespace(drive_files=[item], lock=threading.Lock(),
+                                 note=lambda _message: None)
+        handler = _drive_content_handler(state, "/api/drive/content?id=abc123")
+
+        with patch.object(drive, "build_service", return_value=object()), \
+             patch.object(drive, "pull_file", return_value=docx_path):
+            handler.do_GET()
+
+    header_block, _, body = handler.wfile.getvalue().partition(b"\r\n\r\n")
+    assert b" 200 " in header_block.split(b"\r\n", 1)[0]
+    assert b"Content-Type: text/html; charset=utf-8" in header_block
+    assert b"<p>Solve for x.</p>" in body
+
+
+def test_drive_content_authorizes_via_query_secret_for_iframe_loads():
+    """The material drawer loads /api/drive/content as an <iframe> src, which
+    carries neither the X-iNTUition-Session header nor (in the packaged WebView2
+    shell) the SameSite cookie. openMaterial() appends the secret as ?s=; the
+    handler must accept it there or every preview 401s."""
+    with TemporaryDirectory() as tmp:
+        pdf_path = os.path.join(tmp, "tut1.pdf")
+        with open(pdf_path, "wb") as f:
+            f.write(b"%PDF-1.4 body")
+
+        item = {"id": "abc123", "mime_type": "application/pdf",
+                "rel_path": "SC2001/Tutorial/tut1.pdf", "size": 12}
+        state = SimpleNamespace(drive_files=[item], lock=threading.Lock(),
+                                 note=lambda _message: None,
+                                 local_secret="s3cr3t")
+        handler = _drive_content_handler(
+            state, "/api/drive/content?id=abc123&s=s3cr3t")
+
+        with patch.object(drive, "build_service", return_value=object()), \
+             patch.object(drive, "pull_file", return_value=pdf_path):
+            handler.do_GET()
+
+    header_block = handler.wfile.getvalue().partition(b"\r\n\r\n")[0]
+    assert b" 200 " in header_block.split(b"\r\n", 1)[0]
+    assert b"Content-Type: application/pdf" in header_block
+
+
+def test_drive_content_unauthorized_serves_html_not_json():
+    """A missing/wrong secret must still render legibly in the drawer, not as
+    Chrome's pretty-printed JSON viewer."""
+    item = {"id": "abc123", "mime_type": "application/pdf",
+            "rel_path": "SC2001/Tutorial/tut1.pdf", "size": 12}
+    state = SimpleNamespace(drive_files=[item], lock=threading.Lock(),
+                             note=lambda _message: None, local_secret="s3cr3t")
+    handler = _drive_content_handler(state, "/api/drive/content?id=abc123")
+    handler.do_GET()
+
+    response = handler.wfile.getvalue()
+    header_block, _, body = response.partition(b"\r\n\r\n")
+    assert b" 401 " in header_block.split(b"\r\n", 1)[0]
+    assert b"Content-Type: text/html; charset=utf-8" in header_block
+    assert b"application/json" not in header_block
+
+
+def test_drive_content_preview_failure_serves_html_not_json():
+    """/api/drive/content is loaded straight into the material drawer's <iframe>,
+    so a JSON error body renders as Chrome's pretty-printed JSON viewer inside the
+    drawer. A failed Drive pull should instead serve a plain styled HTML page the
+    drawer can show as a legible reason."""
+    item = {"id": "abc123", "mime_type": "application/pdf",
+            "rel_path": "SC2001/Tutorial/tut1.pdf", "size": 1024}
+    notes = []
+    state = SimpleNamespace(drive_files=[item], lock=threading.Lock(),
+                             note=notes.append)
+
+    handler = dashboard.Handler.__new__(dashboard.Handler)
+    handler.state = state
+    handler.path = "/api/drive/content?id=abc123"
+    handler.requestline = "GET {} HTTP/1.1".format(handler.path)
+    handler.request_version = "HTTP/1.1"
+    handler.rfile = io.BytesIO(b"")
+    handler.wfile = io.BytesIO()
+    handler._headers_buffer = []
+    handler.close_connection = False
+
+    with patch.object(drive, "build_service", return_value=object()), \
+         patch.object(drive, "pull_file", side_effect=RuntimeError("boom")):
+        handler.do_GET()
+
+    response = handler.wfile.getvalue()
+    header_block, _, body = response.partition(b"\r\n\r\n")
+    assert b" 500 " in header_block.split(b"\r\n", 1)[0]
+    assert b"Content-Type: text/html; charset=utf-8" in header_block
+    assert b"application/json" not in header_block
+    assert b"Google Drive" in body
+    assert notes and "Drive preview failed" in notes[0]

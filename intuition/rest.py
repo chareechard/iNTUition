@@ -13,14 +13,15 @@ import json
 import mimetypes
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+from urllib3.util.retry import Retry
 
 from intuition.auth import parse_bbrouter
 from intuition.utils import REQUEST_TIMEOUT
@@ -41,6 +42,8 @@ from intuition.constants import (
 from intuition.models import Doc, Folder, RecordedLecture
 
 PAGE_LIMIT = 100
+MAX_PAGES = 500
+MAX_RESULTS = 100_000
 
 # Content handlers that point at something hosted outside Learn (Zoom, Panopto, Kaltura,
 # Echo360, ...). These cannot be downloaded with a Learn session cookie alone.
@@ -83,6 +86,9 @@ class RestForbidden(RestUnavailable):
     """
 
 
+class RestContentCycle(RestUnavailable):
+    """The course content response is not a tree."""
+
 # One pooled session for the whole process. A full scan issues a few hundred small
 # sequential requests; without pooling each one paid a fresh TLS handshake, which is
 # both slow and the kind of burst that gets a client throttled.
@@ -104,6 +110,32 @@ _SESSION.mount(
 )
 
 
+_THREAD_SESSIONS = threading.local()
+
+
+def _session() -> requests.Session:
+    """Return a pooled requests session isolated to the current worker thread."""
+    if threading.current_thread() is threading.main_thread():
+        return _SESSION
+    session = getattr(_THREAD_SESSIONS, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.mount(
+            "https://",
+            HTTPAdapter(
+                max_retries=Retry(
+                    total=3,
+                    connect=3,
+                    backoff_factor=0.5,
+                    status_forcelist=(429, 500, 502, 503, 504),
+                    allowed_methods=frozenset(["GET"]),
+                )
+            ),
+        )
+        _THREAD_SESSIONS.session = session
+    return session
+
+
 def _headers(BbRouter: str) -> Dict[str, str]:
     headers = {
         "Accept": "application/json",
@@ -116,8 +148,9 @@ def _headers(BbRouter: str) -> Dict[str, str]:
     return headers
 
 
-def _get(BbRouter: str, url: str, params: Optional[Dict] = None) -> Dict:
-    response = _SESSION.get(
+def _get(BbRouter: str, url: str, params: Optional[Dict] = None,
+         allow_missing: bool = False) -> Dict:
+    response = _session().get(
         url, headers=_headers(BbRouter), cookies={"BbRouter": BbRouter}, params=params,
         timeout=REQUEST_TIMEOUT,
     )
@@ -127,7 +160,7 @@ def _get(BbRouter: str, url: str, params: Optional[Dict] = None) -> Dict:
         )
     if response.status_code == 403:
         raise RestForbidden("REST API denied access (403) to {}".format(url))
-    if response.status_code in (400, 404):
+    if response.status_code in (400, 404) and allow_missing:
         # Normal for sub-resources that do not apply to a given item. Verified against
         # the live instance: asking a folder for its attachments returns
         # 400 {"message": "The Content Item does not support file attachments"},
@@ -136,7 +169,13 @@ def _get(BbRouter: str, url: str, params: Optional[Dict] = None) -> Dict:
     response.raise_for_status()
     if not response.content:
         return {}
-    return response.json()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RestUnavailable("Blackboard returned invalid JSON from {}".format(url)) from exc
+    if not isinstance(payload, dict):
+        raise RestUnavailable("Blackboard returned an invalid response shape")
+    return payload
 
 
 def _get_paged(BbRouter: str, url: str, params: Optional[Dict] = None) -> List[Dict]:
@@ -146,15 +185,33 @@ def _get_paged(BbRouter: str, url: str, params: Optional[Dict] = None) -> List[D
     results: List[Dict] = []
     next_url: Optional[str] = url
 
-    while next_url:
+    seen = set()
+    for _page in range(MAX_PAGES):
+        if not next_url:
+            return results
+        if next_url in seen:
+            raise RestUnavailable("Blackboard pagination cycle detected")
+        seen.add(next_url)
         payload = _get(BbRouter, next_url, params=params)
-        results.extend(payload.get("results", []))
-        next_page = payload.get("paging", {}).get("nextPage")
+        page_results = payload.get("results", [])
+        if not isinstance(page_results, list) or any(
+            not isinstance(row, dict) for row in page_results
+        ):
+            raise RestUnavailable("Blackboard returned invalid pagination results")
+        results.extend(page_results)
+        if len(results) > MAX_RESULTS:
+            raise RestUnavailable("Blackboard pagination exceeded result limit")
+        paging = payload.get("paging") or {}
+        if not isinstance(paging, dict):
+            raise RestUnavailable("Blackboard returned invalid pagination metadata")
+        next_page = paging.get("nextPage")
+        if next_page is not None and not isinstance(next_page, str):
+            raise RestUnavailable("Blackboard returned an invalid nextPage link")
         next_url = urljoin(NTULEARN_URL, next_page) if next_page else None
         # nextPage already carries offset/limit in its query string.
         params = None
 
-    return results
+    raise RestUnavailable("Blackboard pagination exceeded page limit")
 
 
 def get_todo_items(BbRouter: str, courses: List[Dict], days: int = 7) -> List[Dict]:
@@ -317,6 +374,7 @@ def _docs_from_item(
             REST_CONTENT_ATTACHMENTS_URL.format(
                 course_id=course_id, content_id=content_id
             ),
+            allow_missing=True,
         )
         attachments = [
             {"id": a["id"], "fileName": a.get("fileName")}
@@ -351,7 +409,7 @@ def _docs_from_body(item: Dict) -> List[Doc]:
         return []
     out, seen = [], set()
     for anchor in BeautifulSoup(body, "lxml").find_all("a", href=True):
-        href = anchor.get("href", "")
+        href = str(anchor.get("href") or "")
         if "/bbcswebdav/" not in href or "ntulearn.ntu.edu.sg" not in href:
             continue
         # Query signatures may differ for the same resource; xid is the stable part.
@@ -361,7 +419,7 @@ def _docs_from_body(item: Dict) -> List[Doc]:
         seen.add(identity)
         meta = {}
         try:
-            meta = json.loads(anchor.get("data-bbfile") or "{}")
+            meta = json.loads(str(anchor.get("data-bbfile") or "{}"))
         except (TypeError, ValueError):
             pass
         name = (meta.get("linkName") or anchor.get_text(" ", strip=True)
@@ -437,9 +495,34 @@ def get_download_dir(
             "REST API returned no content for course {}".format(course_id)
         )
 
+    by_id: Dict[str, Dict] = {}
+    for item in items:
+        item_id = item.get('id')
+        if not isinstance(item_id, str) or not item_id:
+            raise RestUnavailable('Blackboard returned course content without an id')
+        if item_id in by_id:
+            raise RestContentCycle('Blackboard returned duplicate course content id {}'.format(item_id))
+        by_id[item_id] = item
+
     by_parent: Dict[Optional[str], List[Dict]] = {}
     for item in items:
         by_parent.setdefault(item.get("parentId"), []).append(item)
+    graph_state: Dict[str, int] = {}
+    for start in by_id:
+        current = start
+        path: List[str] = []
+        path_set: Set[str] = set()
+        while current in by_id and graph_state.get(current, 0) == 0:
+            graph_state[current] = 1
+            path.append(current)
+            path_set.add(current)
+            parent_id = by_id[current].get('parentId')
+            current = parent_id if isinstance(parent_id, str) else ''
+        if current and current in path_set:
+            raise RestContentCycle('Blackboard course content cycle detected at {}'.format(current))
+        for item_id in path:
+            graph_state[item_id] = 2
+
     for siblings in by_parent.values():
         siblings.sort(key=lambda i: i.get("position", 0))
 
@@ -454,7 +537,19 @@ def get_download_dir(
     skipped: List[str] = []
     forbidden: List[str] = []
 
+    active_ids: Set[str] = set()
+
     def build(item: Dict):
+        item_id = item['id']
+        if item_id in active_ids:
+            raise RestContentCycle('Blackboard course content cycle detected at {}'.format(item_id))
+        active_ids.add(item_id)
+        try:
+            return build_inner(item)
+        finally:
+            active_ids.remove(item_id)
+
+    def build_inner(item: Dict):
         title = (item.get("title") or item.get("id") or "").strip()
         handler = (item.get("contentHandler") or {}).get("id", "")
 

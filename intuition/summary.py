@@ -22,7 +22,7 @@ prompt, the same way ``research.research()`` only ever runs on request.
 """
 import os
 import re
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from intuition import ai_provider, drive, latex, materials
 
@@ -43,9 +43,16 @@ SIBLING_TOTAL_CHAR_LIMIT = 20000
 # ceiling (finish_reason "length"/"max_tokens") a few hundred tokens before the
 # closing % END BODY marker, which _extract_body then reports as a confusing
 # "model didn't follow the format" error rather than what it actually was: ran out
-# of room. Doubled with headroom for documents at least this size; see
-# _extract_body's finish-reason check below for what happens if it still isn't enough.
-MAX_TOKENS = 16000
+# of room. Doubling to 16000 still wasn't enough for a whole-topic (SCOPE_TOPIC)
+# summary composing over several sibling files' worth of citations and tables, so
+# ai_provider.complete now streams its scholar-tier call the same way
+# research.research() already does - the earlier non-streaming ceiling wasn't only
+# about model quality, a large max_tokens risks the API's own non-streaming timeout
+# too. Doubling again to 32000 still wasn't enough for the largest whole-topic runs
+# routed through OmniRoute's scholar rung (claude/claude-opus-5), so doubled once
+# more. See _extract_body's finish-reason check below for what happens if a
+# document still runs past this.
+MAX_TOKENS = 64000
 
 SCOPE_MATERIAL = "material"   # ring 1 only
 SCOPE_NOTES = "notes"         # ring 1 + ring 2 (your note, your FRIDAY conversation)
@@ -80,6 +87,20 @@ a diagram's own labels, an image-only slide, a callout box, colour or highlighti
 as emphasis. Read every page image before writing. Never conclude that content is \
 unavailable, or that the source "doesn't cover" something, on the basis of the extracted \
 text alone - check the image first.
+
+The extracted text is a machine transcript and carries predictable transcription noise \
+that is NOT part of the source: mid-word spaces and broken hyphenation ("differen \
+tiability", "sub- sequence"), symbol-font bullets that arrive as stray glyphs or empty \
+boxes, lost ligatures, and mathematics that has been flattened - operators dropped, \
+super/subscripts pushed inline, a fraction split across a line ("|xy| x2+y 2" for \\( xy \
+/ (x^2 + y^2) \\), stray or duplicated signs). Silently repair all of this when you \
+reproduce text; the page image is the authority for what a symbol or expression actually \
+is. Reproducing a garbled fragment verbatim inside a sourcequote is a fidelity failure, \
+not fidelity. A citation-shaped fragment the transcript has dropped mid-sentence ("... \
+the limit, Teaching Week 3 Lecture Slides p.19, does not exist") is a slide's own \
+cross-reference, not part of the sentence - lift it out; if it is worth keeping, put it \
+in parentheses at the end. This clean-up is invisible to the reader and is never \
+mentioned in the body or the report.
 
 Output contract: reply with exactly two fenced blocks, in this order, nothing before, \
 between, or after them beyond the markers themselves:
@@ -163,11 +184,19 @@ quietly loses a sentence.
 sentence that could be a phrase, or a paragraph that could be a bullet list, costs the \
 reader time they don't have. Prefer itemize/enumerate/tables over prose paragraphs \
 wherever the material is itself a list, a comparison, or a procedure. State a definition \
-once, precisely; don't restate it in different words a paragraph later. Cut connective \
-throat-clearing ("It is important to note that...", "As we can see..."); start each \
-section on the substance. None of this licenses cutting content required by the other \
-rules - citations, verbatim quotes, and the gaps section stay - it means every sentence \
-that remains earns its place.
+once, precisely; don't restate it in different words a paragraph later. Cut hard, and cut \
+these first: connective throat-clearing ("It is important to note that...", "As we can \
+see..."); any commentary ABOUT the slides rather than their content ("the lecturer \
+emphasises", "this slide is dense", "helpfully, the deck then..."); a multi-line \
+derivation where only the result and one non-obvious step are examinable - give those two \
+and stop, unless the derivation method is itself what gets tested. Every sentence that \
+survives is a definition, a stated result, a condition, a worked counterexample, or a \
+comparison - nothing else. A structure the source offers (a decision table, an \
+implication chart, a short counterexample) is denser than the prose around it: keep the \
+structure, drop the prose. None of this licenses cutting content required by the other \
+rules - a cut that removes a cited fact, one member of an "A or B", the verbatim wording \
+of a definition, a parallel-item cell, or the gaps section is the loss failure this whole \
+document guards against, not concision.
 
 7. DIAGRAMS AND FIGURES, REDRAWN RATHER THAN DECLARED LOST. A tikzpicture or \\srcfig is \
 a tool for a process, a structure, a state machine, or a spatial relationship that is \
@@ -236,18 +265,55 @@ class Corpus(NamedTuple):
     note_text: str                              # ring 2a, "" if none/excluded
     chat_turns: List[Dict]                      # ring 2b, [] if none/excluded
     siblings: List[Tuple[str, List[Tuple[int, str]]]]  # ring 3, [(name, pages)]
-    figures: List[Tuple[int, bytes, str]] = ()  # ring 1, [(page, data, ext)], real
+    figures: Sequence[Tuple[int, bytes, str]] = ()  # ring 1, [(page, data, ext)], real
                                                  # images pulled from the open material -
                                                  # () not [], a shared mutable default is
                                                  # a bug waiting to happen
-    page_images: List[Tuple[int, bytes]] = ()   # ring 1, [(page, png_bytes)], a full
+    page_images: Sequence[Tuple[int, bytes]] = ()   # ring 1, [(page, png_bytes)], a full
                                                  # render of every page - what the model
                                                  # actually sees, text extraction is blind
                                                  # to a diagram's own labels
 
 
+# -- Extraction-glitch cleanup on the source text before it reaches the model -----
+# A PDF/PPTX text layer reproducibly mangles a handful of things the same way every
+# time; fixing the mechanical ones here is cheaper and more reliable than spending
+# the model's attention on them. COMPENDIUM_SYSTEM still covers the defects no regex
+# can safely touch (mid-word spaces, flattened maths) because the page image is the
+# authority for those. This runs only on the *input* corpus, never on the model's
+# LaTeX output - that is _clean_text's job.
+_LIGATURES = {
+    "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi",
+    "ﬄ": "ffl", "ﬅ": "ft", "ﬆ": "st",
+}
+# Bullet glyphs a symbol/Wingdings list marker leaves in the text layer, plus the
+# mojibake of a UTF-8 bullet mis-decoded as latin-1. The middle dot U+00B7 is left
+# alone when bare (it is also a multiplication sign) and caught only as mojibake.
+_BULLET_LINE_RE = re.compile(
+    "^([ \t]*)(?:[▪●◦∙⁃◆]"
+    "|Â·|â€¢)[ \t]*", re.M)
+_ZERO_WIDTH_RE = re.compile(
+    "[​‌‍⁠﻿­]")
+# A word broken by a soft line-wrap: "differ-" + newline + "entiability". Restricted
+# to lower-hyphen-newline-lower, where PDF hyphenation falls; a real hyphenated
+# compound wrapped at exactly that point is rare and reads fine joined.
+_HYPHEN_WRAP_RE = re.compile("([a-z])-\n[ \t]*([a-z])")
+
+
+def _clean_extracted_text(text: str) -> str:
+    """Undo the deterministic defects of a slide/PDF text layer."""
+    for glyph, repl in _LIGATURES.items():
+        text = text.replace(glyph, repl)
+    text = _ZERO_WIDTH_RE.sub("", text)
+    text = text.replace(" ", " ")
+    text = _HYPHEN_WRAP_RE.sub(r"\1\2", text)
+    text = _BULLET_LINE_RE.sub(r"\1- ", text)
+    return text
+
+
 def _page_marked(pages: List[Tuple[int, str]]) -> str:
-    return "\n\n".join("[[p.{}]]\n{}".format(num, text) for num, text in pages)
+    return "\n\n".join("[[p.{}]]\n{}".format(num, _clean_extracted_text(text))
+                       for num, text in pages)
 
 
 def assemble_corpus(material_path: str, material_name: str, scope: str,

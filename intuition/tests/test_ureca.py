@@ -107,7 +107,7 @@ class TestSuggestParsing(unittest.TestCase):
 
     def test_caps_at_max_suggestions(self):
         raw = json.dumps([{"title": "T{}".format(i), "topic": "Idea {}".format(i)}
-                          for i in range(10)])
+                          for i in range(ureca.MAX_SUGGESTIONS + 5)])
         self.assertEqual(len(ureca.parse_suggest_response(raw)), ureca.MAX_SUGGESTIONS)
 
     def test_markdown_fence_is_unwrapped(self):

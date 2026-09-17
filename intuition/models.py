@@ -1,6 +1,4 @@
-from typing import List, Union, Dict
-
-from intuition import api
+from typing import List, Optional, Set, Union, Dict
 from intuition.parsing import parse_content_page
 from intuition.utils import (
     get_ids_from_listContent_url,
@@ -43,22 +41,44 @@ class Folder(Base):
         )
         children: List[MODEL_TYPES] = []
         if course_content_id is not None:
+            # Keep the model layer independent from the API module at import time.
+            # api.py constructs models, so a module-level import here creates a
+            # circular initialization edge.
+            from intuition import api
             course_id, content_id = course_content_id
             soup = api.make_get_contents_request(BbRouter, course_id, content_id)
             children = [to_model(c) for c in parse_content_page(soup)]
         self.children = children
 
-    def serialize(self, BbRouter: str) -> Dict:
+    def serialize(self, BbRouter: str, _active_folders: Optional[Set[object]] = None) -> Dict:
         # convert Folder into a Python dictionary, note that it recursively serializes its children
+        active_folders = _active_folders if _active_folders is not None else set()
+        content_ids = get_ids_from_listContent_url(self.link) if self.link else None
+        identity = content_ids if content_ids is not None else id(self)
+        if identity in active_folders:
+            raise ValueError(
+                'Blackboard course content cycle detected at folder {!r}'.format(
+                    self.name
+                )
+            )
+        active_folders.add(identity)
+
+        def serialize_child(child):
+            if isinstance(child, Folder):
+                return child.serialize(BbRouter, _active_folders=active_folders)
+            return child.serialize(BbRouter)
+
         if self.children is None:
             self.load_children(BbRouter)
-        return {
+        result = {
             "type": "folder",
             "name": self.name,
-            "children": [x.serialize(BbRouter) for x in self.children]
+            "children": [serialize_child(x) for x in self.children]
             if self.children
             else [],
         }
+        active_folders.remove(identity)
+        return result
 
     def __eq__(self, other):
         # compare atttribute and recursively check the children

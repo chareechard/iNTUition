@@ -10,7 +10,9 @@ import json
 import os
 import threading
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
+
+from intuition.persistence import atomic_json_dump
 
 STORAGE_DIR = ".intuition"
 FILENAME = "profile.json"
@@ -35,7 +37,7 @@ def _now() -> str:
 class Store:
     def __init__(self, download_root: str):
         self.path = store_path(download_root)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.data: Dict = dict(DEFAULTS)
         self.load()
 
@@ -53,12 +55,8 @@ class Store:
                     self.data[key] = str(saved[key]).strip()
 
     def save(self):
-        directory = os.path.dirname(self.path)
-        os.makedirs(directory, exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, indent=1)
-        os.replace(tmp, self.path)
+        with self._lock:
+            atomic_json_dump(self.path, self.data, indent=1)
 
     def get(self) -> Dict:
         with self._lock:

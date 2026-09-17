@@ -23,11 +23,12 @@ from intuition.ledger import Ledger
 
 
 def human(size: int) -> str:
+    value = float(size)
     for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return "{:.1f} {}".format(size, unit)
-        size /= 1024.0
-    return str(size)
+        if value < 1024 or unit == "GB":
+            return "{:.1f} {}".format(value, unit)
+        value /= 1024.0
+    return str(value)
 
 
 def main():

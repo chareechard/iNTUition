@@ -20,6 +20,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+from intuition.persistence import atomic_json_dump
+
 STORAGE_DIR = ".intuition"
 CACHE_FILENAME = "content_cache.json"
 # An empty attachment list is weak evidence: Blackboard can publish a file after the
@@ -37,7 +39,7 @@ class ContentCache:
 
     def __init__(self, download_root: str):
         self.path = cache_path(download_root)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.courses: Dict[str, Dict[str, Dict]] = {}
         self.hits = 0
         self.misses = 0
@@ -55,13 +57,8 @@ class ContentCache:
             self.courses = {}
 
     def save(self):
-        directory = os.path.dirname(self.path)
-        if directory and not os.path.isdir(directory):
-            os.makedirs(directory, exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.courses, f, sort_keys=True)
-        os.replace(tmp, self.path)
+        with self._lock:
+            atomic_json_dump(self.path, self.courses, indent=0)
 
     def get_attachments(
         self, course_id: str, content_id: str, modified: Optional[str]

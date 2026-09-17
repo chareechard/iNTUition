@@ -15,9 +15,9 @@ pre-populated dashboard state.
   task queries, announcements, and study tools.
 - Optional schedule import from a timetable PDF, text file, ICS, or CSV.
 - Optional local Drive relay, media transcription, inbox triage, and research drafting.
-- Profile-driven research drafting without bundled supervisor, faculty, or institutional directory records.
+- A small public NTU faculty-interest catalogue used only to improve research-topic
+  matching. It is reference data, not user-account data, and can be replaced or refreshed.
 - Desktop packaging helpers for PyInstaller.
-- Offline tests use synthetic inputs only; downloaded account exports and institutional reference snapshots are intentionally omitted.
 
 ## Requirements
 
@@ -38,6 +38,11 @@ python -m pip install -e .
 ```
 
 On macOS or Linux, activate the environment with `source .venv/bin/activate` instead.
+
+For reproducible Windows/Python 3.12 installs, the validated dependency snapshot is
+also available as requirements-py312.lock:
+
+    python -m pip install -r requirements-py312.lock
 
 Install optional feature groups only when needed:
 
@@ -84,11 +89,17 @@ Use a real cookie only in a local shell or the dashboard form. Do not put it in 
 # Run the dashboard without opening a browser
 python -m intuition.dashboard --download_to NTU --no_browser
 
+# Run the editable desktop development shell
+python -m intuition.desktop
+
 # Import an optional timetable through the dashboard
 # (the dashboard accepts PDF, TXT, ICS, and CSV files)
 
 # Run the test suite
 python -m pytest intuition/tests -q
+
+# Run the static type gate used by the build
+python -m mypy intuition
 
 # Build the desktop bundle after installing the desktop extra
 python tools/build.py --skip-tests --clean --no-smoke
@@ -101,21 +112,23 @@ That data is intentionally separate from the package and is not suitable for sha
 
 The main package is `intuition`:
 
-- `dashboard.py` ? local HTTP dashboard and orchestration layer.
-- `api.py`, `rest.py`, `auth.py`, `sync.py`, `contentcache.py`, and `ledger.py` ?
+- `dashboard.py` — local HTTP dashboard and orchestration layer.
+- `api.py`, `rest.py`, `auth.py`, `sync.py`, `contentcache.py`, and `ledger.py`, and `persistence.py` —
   Blackboard access, authentication, incremental sync, caching, and download state.
 - `schedule.py`, `academic_calendar.py`, `semester.py`, `announcements.py`, and
-  `inbound.py` ? academic dates, timetable/announcement parsing, and optional inbox triage.
-- `drive.py`, `drive_push.py`, and `materials.py` ? local/Drive material discovery and relay.
-- `notes.py`, `todo.py`, `triage.py`, `triage_store.py`, and `triage_run.py` ? local study
+  `inbound.py` — academic dates, timetable/announcement parsing, and optional inbox triage.
+- `drive.py`, `drive_push.py`, and `materials.py` — local/Drive material discovery and relay.
+- `notes.py`, `todo.py`, `triage.py`, `triage_store.py`, and `triage_run.py` — local study
   notes, task queries, and triage workflows.
-- research.py, ureca.py, profile.py, and saved_topics.py - profile-driven research drafting and locally saved topics.
-- `lab.py`, `lab_analysis.py`, `chat_memory.py`, `summary.py`, and `compendium.py` ?
+- `research.py`, `ureca.py`, `profile.py`, `faculty_db.py`, and `saved_topics.py` —
+  profile-driven research drafting and public faculty-interest matching.
+- `lab.py`, `lab_analysis.py`, `chat_memory.py`, `summary.py`, and `latex.py` —
   study-lab, AI-assisted study, memory, and document features.
-- `desktop.py`, `build_info.py`, `utils.py`, and `__main__.py` ? desktop entry point,
+- `desktop.py`, `build_info.py`, `utils.py`, and `__main__.py` — desktop entry point,
   build metadata, shared helpers, and package execution support.
-- `static/` ? dashboard HTML and vendored browser assets.
-- `tests/` ? unit and integration tests; they use temporary directories and mocks.
+- `static/` — dashboard HTML and vendored browser assets.
+- `data/` — public reference data used by the research matcher.
+- `tests/` — unit and integration tests; they use temporary directories and mocks.
 
 The repository also retains `main.py` as a small compatibility CLI wrapper. New feature
 work should generally target the `intuition` package and its dashboard APIs.
@@ -131,7 +144,8 @@ Git:
 - screenshots, PDFs, logs, and debug exports created from a real account.
 
 Before publishing, run a repository scan for email addresses, absolute home paths, account
-IDs, cookies, and downloaded filenames. institutional directory records.
+IDs, cookies, and downloaded filenames. Public NTU faculty reference records are the one
+intentional exception; they should remain clearly separated from user-generated state.
 
 ## Contributions
 
@@ -142,5 +156,3 @@ credentials, course exports, or screenshots containing student information.
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-Repository maintainer: [@chareechard](https://github.com/chareechard)

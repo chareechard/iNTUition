@@ -1,6 +1,6 @@
 """Tests for the REST content backend.
 
-These stub out ``requests.get`` rather than using the synthetic HTTP server, because the
+These stub out ``requests.get`` rather than using the fixture HTTP server, because the
 REST endpoints are absolute URLs baked into constants.py.
 """
 import json
@@ -323,6 +323,25 @@ class TestRest(unittest.TestCase):
         with patch("intuition.rest._SESSION.get", capture):
             rest.get_courses(BbRouter)
         self.assertEqual(captured["X-Blackboard-XSRF"], "tok")
+
+
+    def test_parent_cycle_is_rejected_before_tree_build(self):
+        items = [
+            {'id': '_a_1', 'parentId': '_b_1', 'title': 'A', 'contentHandler': {}},
+            {'id': '_b_1', 'parentId': '_a_1', 'title': 'B', 'contentHandler': {}},
+        ]
+        with patch.object(rest, '_get_paged', return_value=items):
+            with self.assertRaises(rest.RestContentCycle):
+                rest.get_download_dir('token', 'Course', 'course')
+
+    def test_duplicate_content_id_is_rejected(self):
+        items = [
+            {'id': '_same_1', 'parentId': None, 'title': 'A', 'contentHandler': {}},
+            {'id': '_same_1', 'parentId': None, 'title': 'B', 'contentHandler': {}},
+        ]
+        with patch.object(rest, '_get_paged', return_value=items):
+            with self.assertRaises(rest.RestContentCycle):
+                rest.get_download_dir('token', 'Course', 'course')
 
 
 class TestDuplicateNames(unittest.TestCase):

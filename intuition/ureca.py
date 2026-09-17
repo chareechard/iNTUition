@@ -17,6 +17,8 @@ import uuid
 from datetime import date, datetime
 from typing import Dict, List, Optional
 
+from intuition.persistence import atomic_json_dump
+
 STORAGE_DIR = ".intuition"
 FILENAME = "ureca.json"
 CATEGORIES = ("URECA", "IDR-URECA", "CLRI-URECA")
@@ -54,7 +56,7 @@ def next_registration_deadline(today: Optional[date] = None) -> str:
 class Store:
     def __init__(self, download_root: str):
         self.path = store_path(download_root)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.items: List[Dict] = []
         self.load()
 
@@ -69,12 +71,8 @@ class Store:
             self.items = []
 
     def save(self):
-        directory = os.path.dirname(self.path)
-        os.makedirs(directory, exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"items": self.items}, f, indent=1)
-        os.replace(tmp, self.path)
+        with self._lock:
+            atomic_json_dump(self.path, {"items": self.items}, indent=1)
 
     def add(self, title: str) -> Dict:
         title = (title or "").strip()
@@ -174,7 +172,7 @@ def parse_draft_response(raw_text: str) -> Dict:
     return {key: _text(data.get(key)) for key in DRAFT_FIELDS}
 
 
-MAX_SUGGESTIONS = 5
+MAX_SUGGESTIONS = 10
 
 
 def parse_suggest_response(raw_text: str) -> List[Dict]:

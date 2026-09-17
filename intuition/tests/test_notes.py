@@ -159,3 +159,42 @@ def test_delete_summaries_older_than_only_removes_the_stale_ones(tmp_path):
     assert [row["id"] for row in removed] == ["old"]
     assert book.get_summary("old") is None
     assert book.get_summary("new") is not None
+
+
+def test_grading_round_trip(tmp_path):
+    book = Notebook(str(tmp_path))
+    saved = book.save_grading(
+        "grade-1", document_id="tut-1", solution_document_id="sol-1",
+        material_name="Tut01.pdf", work_filename="my_answers.pdf",
+        backend="omniroute", model="claude-opus-5", rung="claude/claude-opus-5",
+        feedback="Q1: Correct.", ok=True)
+    loaded = book.get_grading("grade-1")
+    assert loaded == saved
+    assert loaded["ok"] == 1
+    assert loaded["solution_document_id"] == "sol-1"
+    assert loaded["feedback"] == "Q1: Correct."
+
+
+def test_failed_grading_is_still_recorded_with_its_error(tmp_path):
+    book = Notebook(str(tmp_path))
+    book.save_grading("grade-1", document_id="tut-1", ok=False,
+                      error="Could not find readable text in the uploaded file.")
+    loaded = book.get_grading("grade-1")
+    assert loaded["ok"] == 0
+    assert "readable text" in loaded["error"]
+
+
+def test_list_gradings_is_scoped_to_one_document_newest_first(tmp_path):
+    book = Notebook(str(tmp_path))
+    book.save_grading("a", document_id="tut-1", ok=True)
+    book.save_grading("b", document_id="tut-1", ok=True)
+    book.save_grading("c", document_id="tut-2", ok=True)
+    ids = [row["id"] for row in book.list_gradings("tut-1")]
+    assert set(ids) == {"a", "b"}
+    assert "c" not in ids
+
+
+def test_grading_id_is_required(tmp_path):
+    book = Notebook(str(tmp_path))
+    with pytest.raises(ValueError):
+        book.save_grading("", document_id="tut-1")

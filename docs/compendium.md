@@ -1,6 +1,9 @@
 # Compendium - compiled LaTeX summary notes from accessed material
 
-Status: design. Nothing here is built yet.
+Status: implemented. The dashboard's Compendium flow is orchestrated in the dashboard
+and summary modules; drive extraction is page-aware and latex.py owns linting, sandboxed
+compilation, and repair diagnostics. This document records the design contract and
+remaining investigation notes rather than a separate runtime module.
 
 ## What it is
 
@@ -29,8 +32,9 @@ Most of the parts already exist and are load-bearing for something else:
 * KaTeX is already vendored under `static/vendor/katex`, so the body can be previewed in
   the browser before anything is compiled.
 
-What is genuinely new is small: a LaTeX preamble we own, a compile-and-repair loop, page
-provenance, and one honest prompt.
+What is genuinely new is small: a LaTeX preamble we own, a compile-and-repair loop,
+page provenance, and one honest prompt. The implementation lives in the modules named
+above; this file is not a separate runtime module.
 
 ## Research findings
 
@@ -214,8 +218,10 @@ compose the document from the claims. One pass over 12 files does not fit, and m
 importantly a single pass over a whole course produces a summary of nothing in particular.
 
 Token budget for ring 1 and 2: material caps at 40 000 characters, roughly 10 000 tokens.
-Output needs `max_tokens` around 8 000 - a six-page summary with maths is long, and the
-current chat value of 900 (dashboard.py:1777) is nowhere near it.
+Output needs a large `max_tokens` - a six-page summary with maths is long, and the
+current chat value of 900 (dashboard.py:1777) is nowhere near it. In practice this has
+grown from 8 000 to 64 000 (see `summary.MAX_TOKENS`) as larger whole-topic runs kept
+hitting the ceiling before the closing marker.
 
 ## Surfaces
 
@@ -231,8 +237,8 @@ It follows the pattern `do_unified_sync` already uses - worker thread plus polle
 
 ```
 POST /api/study/summary          {id, prompt, scope, include_notes} -> {job}
-GET  /api/study/summary/<job>    -> {state, stage, log, error, tex, ...}
-GET  /api/study/summary/<job>/pdf -> application/pdf
+GET  /api/study/summary?job=<job> -> {state, stage, log, error, tex, ...}
+GET  /api/study/summary/pdf?job=<job> -> application/pdf
 ```
 
 `stage` should be honest and specific, because two minutes of "Working..." is worse than
@@ -256,7 +262,7 @@ Genuinely sequential - each step is testable before the next exists.
 1. The tier ladder in `ai_provider` - see [ai-infrastructure.md](ai-infrastructure.md)
    steps 1-4. No UI, fixes a live inconsistency on its own, and everything else assumes it.
 2. `extract_learning_pages()` in `drive.py`, with `extract_learning_text` rewritten as a
-   join over it. Pure function, easy to test against synthetic inputs.
+   join over it. Pure function, easy to test against the existing PDF fixtures.
 3. `latex.py` - preamble, lint, compile, repair loop. Fully testable with no model in the
    loop: feed it known-good and known-bad bodies.
 4. `summary.py` - corpus assembly and the prompt. Also model-free to test, since

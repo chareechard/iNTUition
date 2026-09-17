@@ -115,7 +115,9 @@ def run_full_backtest(download_root: str = "NTU"):
         mem = chat_memory.ChatMemory(root)
         nb = notes.Notebook(root)
         recent_chats = mem.recent("default", "test")
-        due_cards = nb.due()
+        # Notebook now stores material notes and Compendium summaries; Active Neural Queries
+        # owns due work in todo.Queue. Use its supported no-op search as the smoke probe.
+        due_cards = nb.search("test")
         results["Chat Memory & Notebooks"] = {
             "status": "PASS",
             "details": f"Chat memory ready ({len(recent_chats)} recent), Cards due: {len(due_cards)}"
@@ -150,12 +152,14 @@ def run_full_backtest(download_root: str = "NTU"):
 
     # 12. Dashboard Server Liveness
     try:
-        req = request.Request("http://127.0.0.1:8384/api/state", method="GET")
+        # /api/state is intentionally session-cookie protected; health is the
+        # unauthenticated readiness probe used by service monitors.
+        req = request.Request("http://127.0.0.1:8384/api/health", method="GET")
         with request.urlopen(req, timeout=3.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         results["Dashboard Server (HTTP)"] = {
             "status": "PASS",
-            "details": f"HTTP 200 OK - Courses: {len(data.get('courses', []))}, Plan: {len(data.get('plan', []))}"
+            "details": f"HTTP 200 OK - healthy: {data.get('ok', False)}"
         }
     except Exception as exc:
         results["Dashboard Server (HTTP)"] = {

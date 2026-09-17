@@ -1,8 +1,8 @@
 import json
 import os
 import re
-from typing import List, Optional, Tuple, Union, Dict
-from urllib.parse import parse_qs, urlencode, urlparse
+import tempfile
+from typing import List, Optional, Tuple
 
 import bs4
 import requests
@@ -13,11 +13,7 @@ from intuition.constants import (
     GET_CONTENT_IDS_URL,
     GET_CONTENT_LIST_URL,
     GET_COURSES_URL,
-    LOGINFS_HOSTNAME,
-    LOGINFS_URL,
-    NTULEARN_AUTH_SAML_URL,
     NTULEARN_URL,
-    SAML_SSO_URL,
 )
 from intuition import semester
 from intuition.auth import AuthenticationError, HOW_TO_GET_TOKEN
@@ -52,73 +48,6 @@ def authenticate(username: str, password: str) -> str:
     )
 
 
-def _authenticate_adfs_legacy(username: str, password: str) -> str:
-    """Historical ADFS SSO flow, retained for reference only. Does not work against
-    the current iNTUition deployment.
-
-    Hit the following endpoints:
-    1. GET https://loginfs.ntu.edu.sg/adfs/ls/ to get blank BbRouter
-    2. GET https://ntulearn.ntu.edu.sg/auth-saml/saml/login?apId=_140_1&redirectUrl=https%3A%2F%2Fntulearn.ntu.edu.sg%2Fwebapps%2Fportal%2Fexecute%2FdefaultTab'
-        to get session cookies
-    3. GET https://loginfs.ntu.edu.sg/adfs/ls/?SAMLRequest=<from redirect url> to SAML parameters
-    4. GET https://loginfs.ntu.edu.sg/adfs/ls/ to get login form and client-request-id
-    5. POST https://loginfs.ntu.edu.sg/adfs/ls/ with SAML params and login credentials to get SAML Response
-    6. POST https://ntulearn.ntu.edu.sg/auth-saml/saml/SSO with SAML Response to get authenticated BbRouter
-
-    Arguments:
-        username {str} -- username including domain name (e.g. username@example.invalid)
-        password {str} -- password
-
-    Returns:
-        str -- BbRouter token of format: 
-        expires:{int},id:{str},signature:{str},site:{str},timeout:{int},user:{str},v:{int},xsrf:{str}
-        If there is no user field then authentication has failed
-    """
-    sess = requests.Session()
-    # endpoint 1
-    __ntulearn(sess)
-
-    if sess.cookies.get("BbRouter") is None:
-        raise Exception("Expected BbRouter in returned cookies")
-
-    # endpoint 2
-    saml_response = __ntulearn_auth_saml(sess)
-    login_url = saml_response.url
-    parsed = urlparse(login_url)
-    saml_params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-    saml_params
-
-    # endpoint 3
-    loginfs_response = __loginfs(sess, saml_params)
-    soup = BeautifulSoup(loginfs_response.content.decode(), features="lxml")
-    form = soup.find_all("form")[0]
-    form_url = form.get("action")
-    parsed_form_url = urlparse(form_url)
-    saml_params = {
-        k: v[0] for k, v in parse_qs(parsed_form_url.query).items()
-    }  # overwrite saml_params
-
-    # endpoint 4
-    auth_response = __post_loginfs(sess, username, password, saml_params, login_url)
-    soup = BeautifulSoup(auth_response.content.decode(), features="lxml")
-    SAMLResponse = soup.find_all("input")[0].get("value")
-    referer = login_url + "&client-request-id=" + saml_params["client-request-id"]
-
-    # endpoint 5
-    __ntulearn_SSO(sess, referer, SAMLResponse)
-
-    # check that the BbRouter is authenticated
-    BbRouter: str = sess.cookies.get("BbRouter")
-    if "user" not in BbRouter:
-        raise Exception(
-            "Bbrouter: {} does not have user field, it is not authenticated".format(
-                BbRouter
-            )
-        )
-
-    return BbRouter
-
-
 # How the course list is narrowed. There is deliberately no "everything" option: a
 # sync tool that can be pointed at every enrolment you have ever had is one mis-click
 # away from dragging years of stale material into Drive.
@@ -135,8 +64,10 @@ def load_excluded_courses(download_root: str = ".") -> List[str]:
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    return data
-        except Exception:
+                    return [item for item in data if isinstance(item, str)]
+        except (OSError, ValueError, TypeError):
+            # A malformed preferences file must not prevent a sync from starting.
+            # Treat it as empty and let the next successful save repair it.
             pass
     # No course-specific exclusions are assumed for a new installation
     return []
@@ -147,8 +78,22 @@ def save_excluded_courses(excluded: List[str], download_root: str = "."):
     folder = os.path.join(download_root, ".intuition")
     os.makedirs(folder, exist_ok=True)
     filepath = os.path.join(folder, "excluded_courses.json")
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(excluded, f, indent=2)
+    fd, temporary = tempfile.mkstemp(
+        prefix="excluded_courses.", suffix=".tmp", dir=folder
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(
+                [item for item in excluded if isinstance(item, str)], f, indent=2
+            )
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, filepath)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def is_course_excluded(course_name: str, download_root: str = ".") -> bool:
@@ -168,7 +113,7 @@ def is_course_excluded(course_name: str, download_root: str = ".") -> bool:
 
 
 def get_courses(
-    BbRouter: str, prefer_rest: bool = True, favorites_only: bool = None,
+    BbRouter: str, prefer_rest: bool = True, favorites_only: Optional[bool] = None,
     scope: str = SCOPE_SEMESTER,
     today=None, include_undated: bool = False,
     download_root: str = ".",
@@ -288,19 +233,29 @@ def get_courses_legacy(BbRouter: str) -> List[Tuple[str, str]]:
         cookies=cookies,
         timeout=REQUEST_TIMEOUT,
     )
+    response.raise_for_status()
 
     # parse response
     soup = BeautifulSoup(response.content, features="lxml")
     links = soup.find_all("a")
+    response_url = str(getattr(response, "url", "")).lower()
+    if not links and (
+        "login" in response_url
+        or soup.find("form", action=re.compile(r"login|auth", re.I))
+    ):
+        raise AuthenticationError(
+            "NTU Learn redirected the legacy course request to a login page. "
+            "Refresh the BbRouter cookie.\n\n{}".format(HOW_TO_GET_TOKEN)
+        )
 
     courses: List[Tuple[str, str]] = []
     for link in links:
-        name = link.contents[0]
-        if isinstance(name, bs4.element.Tag):
-            name = name.text
+        if not link.contents:
+            continue
+        name = link.get_text(" ", strip=True)
         # expect fullLink to be of form:
         # link javascript:globalNavMenu.goToUrl('/webapps/blackboard/execute/launcher?type=Course&id=_302242_1&url='); return false;
-        fullLink = link.get("onclick")
+        fullLink = str(link.get("onclick") or "")
         if not fullLink:
             # Ultra base navigation renders plain hrefs with no onclick handler.
             continue
@@ -337,12 +292,14 @@ def get_content_ids(BbRouter: str, course_id: str) -> List[Tuple[str, str]]:
     soup = BeautifulSoup(response.content.decode(), features="lxml")
     ll = soup.find("ul", {"id": "courseMenuPalette_contents"})
     result: List[Tuple[str, str]] = []
-    for c in ll:
+    if ll is None:
+        return result
+    for c in ll.find_all("li"):
         a = c.find("a")
         if a is None:
             continue
-        url = a.get("href")
-        name = a.text
+        url = str(a.get("href") or "")
+        name = a.get_text(" ", strip=True)
         content_id = get_content_id_from_listContent_url(url)
         if content_id:
             result.append((name, content_id))
@@ -407,7 +364,10 @@ def get_file_download_link(BbRouter: str, link: str) -> str:
         str -- file download link
     """
     cookies = {"BbRouter": BbRouter}
-    headers = requests.head(link, allow_redirects=True, cookies=cookies)
+    headers = requests.head(
+        link, allow_redirects=True, cookies=cookies, timeout=REQUEST_TIMEOUT
+    )
+    headers.raise_for_status()
     return headers.url
 
 
@@ -448,6 +408,11 @@ def get_download_dir(
             raise AuthenticationError(
                 "Your NTU Learn session token was rejected ({}).\n\n{}"
                 .format(e, HOW_TO_GET_TOKEN))
+        except rest.RestContentCycle:
+            # The Original-view scraper cannot repair a malformed REST tree and may
+            # encounter the same cycle, so do not hide this structural failure behind
+            # a second traversal.
+            raise
         except (rest.RestUnavailable, requests.RequestException, ValueError) as e:
             print("  REST listing unavailable ({}), falling back to scraper".format(e))
 
@@ -503,125 +468,3 @@ def get_download_dir_legacy(BbRouter: str, course_name: str, course_id: str):
     return folder.serialize(BbRouter)
 
 
-def __ntulearn(session):
-    headers = {
-        "Connection": "keep-alive",
-        "Pragma": "no-cache",
-        "Cache-Control": "no-cache",
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-        "Sec-Fetch-Site": "same-site",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Dest": "document",
-        "Referer": "https://loginfs.ntu.edu.sg/adfs/ls/",
-        "Accept-Language": "en-SG,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-
-    response = session.get(NTULEARN_URL, headers=headers, allow_redirects=True)
-    return response
-
-
-def __ntulearn_auth_saml(session):
-    headers = {
-        "Connection": "keep-alive",
-        "Pragma": "no-cache",
-        "Cache-Control": "no-cache",
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Dest": "document",
-        "Referer": "https://ntulearn.ntu.edu.sg/",
-        "Accept-Language": "en-SG,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-
-    response = session.get(
-        NTULEARN_AUTH_SAML_URL, headers=headers, allow_redirects=True
-    )
-    return response
-
-
-def __loginfs(session, saml_params):
-
-    headers = {
-        "Connection": "keep-alive",
-        "Pragma": "no-cache",
-        "Cache-Control": "no-cache",
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-        "Sec-Fetch-Site": "same-site",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Dest": "document",
-        "Referer": "https://ntulearn.ntu.edu.sg/",
-        "Accept-Language": "en-SG,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-
-    params = (
-        ("SAMLRequest", saml_params["SAMLRequest"]),
-        ("SigAlg", "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),
-        ("Signature", saml_params["Signature"]),
-    )
-
-    response = requests.get(LOGINFS_URL, headers=headers, params=params)
-    return response
-
-
-def __post_loginfs(session, username, password, saml_params, login_url):
-    headers = {
-        "Connection": "keep-alive",
-        "Pragma": "no-cache",
-        "Cache-Control": "no-cache",
-        "Upgrade-Insecure-Requests": "1",
-        "Origin": "https://loginfs.ntu.edu.sg",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-User": "?1",
-        "Sec-Fetch-Dest": "document",
-        "Referer": login_url,
-        "Accept-Language": "en-SG,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-
-    params = (
-        ("SAMLRequest", saml_params["SAMLRequest"]),
-        ("SigAlg", "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),
-        ("Signature", saml_params["Signature"]),
-        ("client-request-id", saml_params["client-request-id"]),
-    )
-
-    data = {
-        "UserName": username,
-        "Password": password,
-        "AuthMethod": "FormsAuthentication",
-    }
-
-    response = session.post(LOGINFS_URL, headers=headers, params=params, data=data)
-    return response
-
-
-def __ntulearn_SSO(session, referer: str, SAMLResponse: str):
-    headers = {
-        "Connection": "keep-alive",
-        "Pragma": "no-cache",
-        "Cache-Control": "no-cache",
-        "Upgrade-Insecure-Requests": "1",
-        "Origin": LOGINFS_HOSTNAME,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-        "Sec-Fetch-Site": "same-site",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Dest": "document",
-        "Referer": referer,
-        "Accept-Language": "en-SG,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-
-    data = {"SAMLResponse": SAMLResponse}
-
-    response = session.post(SAML_SSO_URL, headers=headers, data=data)
-    return response

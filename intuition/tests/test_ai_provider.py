@@ -6,12 +6,26 @@ from types import SimpleNamespace
 from intuition import ai_provider, research
 
 
+class FakeStream:
+    def __init__(self, message):
+        self.message = message
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self.message
+
+
 class Messages:
-    def create(self, **kwargs):
+    def stream(self, **kwargs):
         assert kwargs["system"] == "Summarize faithfully"
-        return SimpleNamespace(model="claude-test", usage=SimpleNamespace(
+        return FakeStream(SimpleNamespace(model="claude-test", usage=SimpleNamespace(
             input_tokens=12, output_tokens=4), content=[SimpleNamespace(
-                type="text", text="Short summary")])
+                type="text", text="Short summary")]))
 
 
 def test_api_completion_uses_shared_shape():
@@ -26,11 +40,11 @@ _PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 10
 
 
 class VisionMessages:
-    def create(self, **kwargs):
+    def stream(self, **kwargs):
         self.seen = kwargs["messages"][0]["content"]
-        return SimpleNamespace(model="claude-test", usage=SimpleNamespace(
+        return FakeStream(SimpleNamespace(model="claude-test", usage=SimpleNamespace(
             input_tokens=12, output_tokens=4), content=[SimpleNamespace(
-                type="text", text="Short summary")])
+                type="text", text="Short summary")]))
 
 
 def test_api_completion_sends_image_blocks_before_the_text_block_when_given():

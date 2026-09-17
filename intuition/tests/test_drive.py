@@ -4,6 +4,7 @@ The real API cannot be exercised without the user's own OAuth client, so this mo
 the pieces the mirror actually depends on: folder lookup by name+parent, folder
 creation, resumable upload, and the size Drive echoes back.
 """
+import base64
 import os
 import time
 import unittest
@@ -990,6 +991,126 @@ class TestRasterizePages(unittest.TestCase):
             with open(path, "wb") as f:
                 f.write(b"not a real pdf")
             self.assertEqual(drive.rasterize_pages(path), [])
+
+
+_W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+_R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+
+
+def _write_docx(path, body_xml, *, rels=None, numbering=None, media=None):
+    """A minimal but namespace-correct .docx: ``body_xml`` is the <w:body> inner XML."""
+    document = ('<?xml version="1.0"?>'
+                '<w:document {w} {r}><w:body>{body}</w:body></w:document>'
+                ).format(w=_W, r=_R, body=body_xml)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document)
+        if rels is not None:
+            entries = "".join(
+                '<Relationship Id="{}" Target="{}"/>'.format(rid, target)
+                for rid, target in rels.items())
+            archive.writestr(
+                "word/_rels/document.xml.rels",
+                '<Relationships xmlns="http://schemas.openxmlformats.org/'
+                'package/2006/relationships">{}</Relationships>'.format(entries))
+        if numbering is not None:
+            archive.writestr("word/numbering.xml",
+                             '<w:numbering {w}>{body}</w:numbering>'.format(
+                                 w=_W, body=numbering))
+        for name, data in (media or {}).items():
+            archive.writestr("word/media/" + name, data)
+
+
+class TestDocxToHtml(unittest.TestCase):
+    """The material drawer loads /api/drive/content into an <iframe>; a .docx has
+    no native browser renderer, so drive.docx_to_html converts it to HTML."""
+
+    def _render(self, body_xml, **kwargs):
+        with TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "notes.docx")
+            _write_docx(path, body_xml, **kwargs)
+            return drive.docx_to_html(path)
+
+    def test_paragraphs_and_heading_styles_become_semantic_tags(self):
+        html_out = self._render(
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>'
+            '<w:r><w:t>Tutorial 6</w:t></w:r></w:p>'
+            '<w:p><w:r><w:t>Solve for x.</w:t></w:r></w:p>')
+        self.assertIn("<h1>Tutorial 6</h1>", html_out)
+        self.assertIn("<p>Solve for x.</p>", html_out)
+
+    def test_bold_and_italic_runs_are_marked_up(self):
+        html_out = self._render(
+            '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Note:</w:t></w:r>'
+            '<w:r><w:rPr><w:i/></w:rPr><w:t> careful here</w:t></w:r></w:p>')
+        self.assertIn("<strong>Note:</strong>", html_out)
+        self.assertIn("<em> careful here</em>", html_out)
+
+    def test_bold_toggle_switched_off_is_not_marked_up(self):
+        html_out = self._render(
+            '<w:p><w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>plain</w:t></w:r></w:p>')
+        self.assertNotIn("<strong>", html_out)
+        self.assertIn("plain", html_out)
+
+    def test_text_is_html_escaped(self):
+        html_out = self._render('<w:p><w:r><w:t>a &lt; b &amp; c</w:t></w:r></w:p>')
+        self.assertIn("a &lt; b &amp; c", html_out)
+        self.assertNotIn("<script", html_out.lower())
+
+    def test_numbered_list_paragraphs_group_into_an_ordered_list(self):
+        numbering = ('<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">'
+                     '<w:numFmt w:val="decimal"/></w:lvl></w:abstractNum>'
+                     '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>')
+        body = ''.join(
+            '<w:p><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr>'
+            '<w:r><w:t>Item {}</w:t></w:r></w:p>'.format(i) for i in (1, 2))
+        html_out = self._render(body, numbering=numbering)
+        self.assertIn("<ol><li>Item 1</li><li>Item 2</li></ol>", html_out)
+
+    def test_bulleted_list_defaults_to_unordered(self):
+        body = ('<w:p><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr>'
+                '<w:r><w:t>loose point</w:t></w:r></w:p>')
+        html_out = self._render(body)
+        self.assertIn("<ul><li>loose point</li></ul>", html_out)
+
+    def test_tables_render_as_html_tables(self):
+        body = ('<w:tbl><w:tr>'
+                '<w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc>'
+                '<w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc>'
+                '</w:tr></w:tbl>')
+        html_out = self._render(body)
+        self.assertIn("<table><tr><td><p>A</p></td><td><p>B</p></td></tr></table>",
+                      html_out)
+
+    def test_inline_image_is_embedded_as_a_data_uri(self):
+        body = ('<w:p><w:r><w:drawing><a:blip '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'r:embed="rId9"/></w:drawing></w:r></w:p>')
+        html_out = self._render(
+            body, rels={"rId9": "media/pic.png"}, media={"pic.png": _PNG})
+        expected = base64.b64encode(_PNG).decode("ascii")
+        self.assertIn('<img src="data:image/png;base64,{}" alt="">'.format(expected),
+                      html_out)
+
+    def test_hyperlinks_resolve_through_the_relationships_part(self):
+        body = ('<w:hyperlink r:id="rId5"><w:r><w:t>NTULearn</w:t></w:r>'
+                '</w:hyperlink>')
+        html_out = self._render(
+            '<w:p>{}</w:p>'.format(body),
+            rels={"rId5": "https://ntulearn.ntu.edu.sg/"})
+        self.assertIn('<a href="https://ntulearn.ntu.edu.sg/" target="_blank" '
+                      'rel="noopener">NTULearn</a>', html_out)
+
+    def test_a_corrupt_archive_raises_drive_error(self):
+        with TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "broken.docx")
+            with open(path, "wb") as f:
+                f.write(b"PK not really a zip")
+            with self.assertRaises(drive.DriveError):
+                drive.docx_to_html(path)
+
+    def test_an_empty_document_raises_drive_error(self):
+        with self.assertRaises(drive.DriveError):
+            self._render('<w:p><w:r><w:t>   </w:t></w:r></w:p>')
 
 
 if __name__ == "__main__":

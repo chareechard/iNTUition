@@ -2,13 +2,14 @@ import io
 import json
 import threading
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from intuition import dashboard, profile
 
 
 def _handler(state, body: dict):
-    handler = dashboard.Handler.__new__(dashboard.Handler)
+    handler: Any = dashboard.Handler.__new__(dashboard.Handler)
     handler.state = state
     handler.path = "/api/research/suggest"
     handler.requestline = "POST /api/research/suggest HTTP/1.1"
@@ -29,6 +30,8 @@ def _state(tmp_path):
         lock=threading.Lock(),
         research_backend=None,
         download_root=str(tmp_path),
+        research_suggest_job=None,
+        note=lambda _message: None,
     )
 
 
@@ -153,3 +156,103 @@ def test_suggest_response_reaches_the_client(tmp_path):
     data = _response_json(handler)
     assert data["suggestions"] == [{"title": "t", "topic": "x"}]
     assert data["backend"] == "cli"
+
+
+def test_async_suggest_acknowledges_before_provider_returns(tmp_path):
+    state = _state(tmp_path)
+    handler = _handler(state, {"keywords": "graph algorithms", "async": True})
+
+    with patch.object(dashboard.ai_provider, "complete_tier",
+                       return_value=_fake_reply()), \
+            patch.object(dashboard.threading, "Thread") as thread_cls:
+        handler.do_POST()
+        call = thread_cls.call_args.kwargs
+        assert call["target"] is dashboard.do_research_suggest
+        call["target"](*call["args"])
+
+    started = _response_json(handler)
+    assert started["job"]["status"] == "running"
+    assert state.research_suggest_job["status"] == "complete"
+    assert state.research_suggest_job["suggestions"] == [{"title": "t", "topic": "x"}]
+
+    status_handler = _handler(state, {})
+    status_handler.path = "/api/research/suggest?job={}".format(started["job"]["id"])
+    status_handler.do_GET()
+    status = _response_json(status_handler)
+    assert status["job"]["status"] == "complete"
+
+
+def test_suggest_with_a_chosen_professor_anchors_the_prompt_and_forces_the_match(tmp_path):
+    state = _state(tmp_path)
+    professor = dashboard.faculty_db.directory()[0]
+    handler = _handler(state, {"professor": professor["id"]})
+
+    captured = {}
+
+    def fake_complete_tier(tier, prompt, system, **kwargs):
+        captured["prompt"] = prompt
+        captured["system"] = system
+        return _fake_reply()
+
+    with patch.object(dashboard.ai_provider, "complete_tier",
+                       side_effect=fake_complete_tier):
+        handler.do_POST()
+
+    assert "Target supervisor: {}".format(professor["name"]) in captured["prompt"]
+    assert "target supervisor" in captured["system"].lower()
+
+    data = _response_json(handler)
+    assert data["professor"]["id"] == professor["id"]
+    # The chosen professor is a guaranteed lead for every suggestion, even one
+    # the keyword/tag catalogue matcher would not have surfaced on its own.
+    assert data["faculty_matches"][0][0]["id"] == professor["id"]
+
+
+def test_research_suggest_pass_is_pinned_to_claude_not_omniroute(tmp_path):
+    state = _state(tmp_path)
+    handler = _handler(state, {"keywords": "graph algorithms"})
+
+    captured = {}
+
+    def fake_complete_tier(tier, prompt, system, **kwargs):
+        captured["preferred"] = kwargs.get("preferred")
+        return _fake_reply()
+
+    with patch.object(dashboard.research_mod, "resolve_claude_backend",
+                       return_value=dashboard.research_mod.BACKEND_CLI), \
+            patch.object(dashboard.ai_provider, "complete_tier",
+                          side_effect=fake_complete_tier):
+        handler.do_POST()
+
+    assert captured["preferred"] == dashboard.research_mod.BACKEND_CLI
+
+
+def test_research_suggest_falls_back_to_omniroute_only_without_claude(tmp_path):
+    state = _state(tmp_path)
+    with patch.object(dashboard.research_mod, "resolve_claude_backend",
+                       return_value=None):
+        assert (dashboard.research_tab_backend(state)
+                == dashboard.research_mod.BACKEND_OMNIROUTE)
+
+
+def test_suggest_rejects_an_unknown_professor_id(tmp_path):
+    state = _state(tmp_path)
+    handler = _handler(state, {"professor": "not-a-real-id"})
+
+    with patch.object(dashboard.ai_provider, "complete_tier") as complete:
+        handler.do_POST()
+
+    assert complete.call_count == 0
+    assert _response_json(handler)["error"] == "unknown professor"
+
+
+def test_suggest_provider_failure_is_not_retried(tmp_path):
+    state = _state(tmp_path)
+    handler = _handler(state, {"keywords": "graph algorithms"})
+
+    with patch.object(dashboard.ai_provider, "complete_tier",
+                       side_effect=dashboard.ai_provider.ProviderError("provider slow")) as complete:
+        handler.do_POST()
+
+    assert complete.call_count == 1
+    assert _response_json(handler)["error"] == "provider slow"
