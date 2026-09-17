@@ -644,7 +644,8 @@ body.labOpen > header, body.labOpen > main, body.labOpen > #announcementPanel, b
 .labExplorerResizer::after { content:""; position:absolute; top:0; bottom:0; left:3px; width:1px; background:transparent; transition:background .12s; }
 .labExplorerResizer:hover::after, .labExplorer.resizing .labExplorerResizer::after { background:var(--cyan); }
 .labExplorer.resizing { user-select:none; }
-.labExplorerHead { flex:none; display:flex; align-items:center; gap:6px; padding:8px 8px 8px 12px; font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--line); }
+.labExplorerHead { flex:none; display:flex; align-items:center; gap:6px; padding:8px 8px 8px 12px; font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--line); cursor:pointer; }
+.labExplorerHead.selected { background:rgba(38,92,124,.22); }
 .labExplorerRepo { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--cyan-soft); letter-spacing:.1em; }
 .labKebabBtn { flex:none; width:20px; height:20px; display:flex; align-items:center; justify-content:center; border:0; border-radius:3px;
   background:transparent; color:var(--muted); cursor:pointer; transition:opacity .12s, background .12s, color .12s; }
@@ -2798,7 +2799,7 @@ Reference a page Ctrl+Alt+P"></div>
       <div class="labBody">
     <aside class="labExplorer">
       <div class="labExplorerHead" id="labExplorerHead">
-        <span class="labExplorerRepo" id="labExplorerRepo" title="Current repository">—</span>
+        <span class="labExplorerRepo" id="labExplorerRepo" title="Current repository - click to target New File/Folder at its root">—</span>
         <button type="button" class="labKebabBtn" id="labRepoMenuBtn" aria-haspopup="menu"
           title="Repository actions (or right-click)" aria-label="Repository actions">
           <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
@@ -12129,6 +12130,7 @@ function renderTree() {
   $('labTree').innerHTML = labState.tree.length
     ? renderNodes(labState.tree)
     : '<div class="labTreeEmpty">No files yet - use File to create one.</div>';
+  $('labExplorerHead').classList.toggle('selected', !labState.selectedDir);
 }
 function toggleFolder(path) {
   if (labState.collapsed.has(path)) labState.collapsed.delete(path);
@@ -14163,7 +14165,12 @@ function wireLab() {
       return;
     }
     const row = ev.target.closest('.labTreeRow');
-    if (!row) return;
+    if (!row) {
+      // Clicked empty space below the tree: aim New File/Folder back at the repo root.
+      labState.selectedDir = '';
+      renderTree();
+      return;
+    }
     if (row.dataset.type === 'file') { openFile(row.dataset.path); return; }
     // Folder row: the caret only toggles; the body selects it as the create
     // target and toggles - the way a folder behaves in the VS Code / Explorer tree.
@@ -14179,6 +14186,12 @@ function wireLab() {
   $('labExplorerHead').addEventListener('contextmenu', (ev) => {
     ev.preventDefault();
     openLabRepoMenu(ev.clientX, ev.clientY);
+  });
+  $('labExplorerHead').addEventListener('click', (ev) => {
+    if (ev.target.closest('.labKebabBtn')) return;
+    // Click the repo header to aim New File/Folder back at the repo root.
+    labState.selectedDir = '';
+    renderTree();
   });
   $('labRepoMenuBtn').addEventListener('click', (ev) => {
     ev.stopPropagation();
